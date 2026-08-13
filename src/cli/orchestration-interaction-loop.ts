@@ -226,7 +226,9 @@ export function boundedPollDelayMs(pollMs: number, deadline: number, now: number
 // backticks, and backslashes, silently changing the replayed payload; single-quote escaping is the
 // only quoting an interactive shell round-trips byte-identically.
 export function posixShellQuote(value: string): string {
-  if (/^[A-Za-z0-9_@%+=:,./#-]+$/.test(value)) {
+  // Why: `#` must NOT be in the safe set — an unquoted leading # starts a shell comment and
+  // silently truncates everything after it (e.g. `--accounts #3,#2`).
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) {
     return value
   }
   return `'${value.replaceAll("'", `'\\''`)}'`

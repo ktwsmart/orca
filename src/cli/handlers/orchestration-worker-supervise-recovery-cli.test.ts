@@ -220,7 +220,7 @@ describe('orchestration worker-supervise recovery contract', () => {
     } as never)
 
     // recovery 指令必須從失敗的帳號開始、且帶前一輪的 dispatch 血緣，重放才是同 payload。
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('--accounts #2'))
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("--accounts '#2'"))
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining('--retry-start-retry-of dispatch-3')
     )

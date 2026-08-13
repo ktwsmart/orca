@@ -214,11 +214,32 @@ describe('Orca 完整互動循環', () => {
 
   it('posixShellQuote：安全字元直通，其餘單引號包裹且不被 shell 展開', () => {
     expect(posixShellQuote('gpt-5.3-codex')).toBe('gpt-5.3-codex')
-    expect(posixShellQuote('#3,#2')).toBe('#3,#2')
+    // # 是 shell 註解起始字元，必須包裹，否則 --accounts #3,#2 之後全被吃掉。
+    expect(posixShellQuote('#3,#2')).toBe("'#3,#2'")
     expect(posixShellQuote('$HOME')).toBe("'$HOME'")
     expect(posixShellQuote('echo "$HOME"')).toBe('\'echo "$HOME"\'')
     expect(posixShellQuote("isn't")).toBe("'isn'\\''t'")
     expect(posixShellQuote('back\\slash')).toBe("'back\\slash'")
     expect(posixShellQuote('multi\nline')).toBe("'multi\nline'")
+  })
+
+  it('posixShellQuote 經真實 /bin/sh round-trip 後位元組一致', async () => {
+    const { execFileSync } = await import('node:child_process')
+    const samples = [
+      '#3,#2',
+      '$HOME',
+      'echo "$HOME"',
+      "isn't",
+      'back\\slash',
+      'multi\nline',
+      'a b  c',
+      '`whoami`'
+    ]
+    for (const sample of samples) {
+      const output = execFileSync('/bin/sh', ['-c', `printf '%s' ${posixShellQuote(sample)}`], {
+        encoding: 'utf8'
+      })
+      expect(output).toBe(sample)
+    }
   })
 })
