@@ -1,4 +1,5 @@
 /* eslint-disable max-lines -- Why: orchestration CLI handlers share flag-parsing helpers and dispatch/preamble logic; splitting by verb would fragment the RuntimeClient call shape without reducing complexity. */
+import { randomUUID } from 'node:crypto'
 import type { CommandHandler } from '../dispatch'
 import type { RuntimeClient } from '../runtime-client'
 import { printResult } from '../format'
@@ -24,7 +25,10 @@ import type { NativeChatMessage } from '../../shared/native-chat-types'
 import type { RuntimeStatus, RuntimeTerminalRead } from '../../shared/runtime-types'
 import type { CodexRateLimitAccountsState } from '../../shared/types'
 import type { GitStatusResult } from '../../shared/git-status-types'
-import { ORCHESTRATION_WORKER_LAUNCH_PREFERENCES_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
+import {
+  ORCHESTRATION_WORKER_LAUNCH_PREFERENCES_RUNTIME_CAPABILITY,
+  ORCHESTRATION_WORKER_MANAGED_ACCOUNT_RUNTIME_CAPABILITY
+} from '../../shared/protocol-version'
 import { orchestrationMigrationData } from '../../shared/orchestration-rpc-contract'
 import { ORCHESTRATION_RUN_PAGE_LIMIT } from '../../shared/orchestration-run-pagination'
 import {
@@ -109,7 +113,10 @@ type LifecycleSendResult =
   | { action: 'rejected'; code: string; reason: string }
 
 type OrchestrationSendResult =
-  | { message: { id: string; run_id?: string }; lifecycle?: LifecycleSendResult }
+  | {
+      message: { id: string; run_id?: string }
+      lifecycle?: LifecycleSendResult
+    }
   | { messages: { id: string }[]; recipients: number }
   | {
       relay: {
@@ -396,6 +403,12 @@ function rejectLifecycleGroupRecipient(type: string | undefined, to: string): vo
   if ((type === 'worker_done' || type === 'heartbeat') && to.startsWith('@')) {
     throw new RuntimeClientError('invalid_argument', getLifecycleGroupRecipientError(type))
   }
+}
+
+// Why: only `released`/`already_released` prove the terminal is gone. `release_pending` and
+// `release_unknown` leave a possibly-live worker, so automated flows must not build on them.
+function isSettledRelease(state: string): boolean {
+  return state === 'released' || state === 'already_released'
 }
 
 function callMutation<TResult>(
@@ -857,7 +870,10 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const output = needsClientAbbreviation
       ? {
           ...result,
-          result: { ...result.result, tasks: abbreviateOrchestrationTasks(result.result.tasks) }
+          result: {
+            ...result.result,
+            tasks: abbreviateOrchestrationTasks(result.result.tasks)
+          }
         }
       : result
     printResult(output, json, (r) => {
@@ -968,10 +984,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         'worker-supervise selects a managed account on the local Orca runtime and cannot use --on. Run it on the worker server instead.'
       )
     }
-    const accountsSnapshot = await client.call<{ codex: CodexRateLimitAccountsState }>(
-      'accounts.list',
-      { refreshUsage: false }
-    )
+    const accountsSnapshot = await client.call<{
+      codex: CodexRateLimitAccountsState
+    }>('accounts.list', { refreshUsage: false })
     let selectors: string[]
     try {
       selectors = parseAccountOrder(
@@ -996,6 +1011,27 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     })
     if (new Set(accounts.map((account) => account.id)).size !== accounts.length) {
       throw new RuntimeClientError('invalid_argument', '--accounts resolves to duplicate accounts.')
+    }
+
+    // Why: worker-supervise always sends managedAccount (and may send model/effort). A runtime
+    // without these capabilities strips the fields silently via non-strict schema parsing, so the
+    // acceptance receipt would record null instead of the account that actually ran. Refuse early.
+    const runtimeStatus = await client.call<RuntimeStatus>('status.get')
+    const runtimeCapabilities = runtimeStatus.result.capabilities ?? []
+    if (!runtimeCapabilities.includes(ORCHESTRATION_WORKER_MANAGED_ACCOUNT_RUNTIME_CAPABILITY)) {
+      throw new RuntimeClientError(
+        'incompatible_runtime',
+        'The connected Orca runtime does not record managed-account identity on worker starts, so supervised account failover cannot leave a truthful audit trail. Update or restart Orca and try again.'
+      )
+    }
+    if (
+      (getOptionalStringFlag(flags, 'model') || getOptionalStringFlag(flags, 'effort')) &&
+      !runtimeCapabilities.includes(ORCHESTRATION_WORKER_LAUNCH_PREFERENCES_RUNTIME_CAPABILITY)
+    ) {
+      throw new RuntimeClientError(
+        'incompatible_runtime',
+        'The connected Orca runtime does not support worker model or effort overrides. Update or restart Orca and try again.'
+      )
     }
 
     const pollMs = getOptionalPositiveIntegerValueFlag(flags, 'poll-ms') ?? 2_000
@@ -1027,35 +1063,51 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       const activeAccountId =
         selected.result.activeAccountIdsByRuntime?.host ?? selected.result.activeAccountId
       if (activeAccountId !== account.id) {
-        throw new RuntimeClientError(
-          'operation_unknown',
-          `Orca did not confirm Codex account ${account.id} as active; no worker was started.`
+        // Why: print the durable attempt history before failing, so earlier account evidence
+        // survives even when the runtime cannot confirm this selection.
+        process.exitCode = 1
+        printLocalResult(
+          {
+            state: 'account_select_unconfirmed',
+            accountId: account.id,
+            attempts
+          },
+          json,
+          `Orca did not confirm Codex account ${account.id} as active; no worker was started and supervision stopped.`
         )
+        return
       }
-      const started = await client.call<WorkerStartReceipt>('orchestration.workerStart', {
-        task,
-        on: getOptionalStringFlag(flags, 'on'),
-        worktree: getOptionalStringFlag(flags, 'worktree'),
-        name: getOptionalStringFlag(flags, 'name'),
-        repo: getOptionalStringFlag(flags, 'repo'),
-        baseBranch: getOptionalStringFlag(flags, 'base-branch'),
-        displayName: getOptionalStringFlag(flags, 'display-name'),
-        comment: getOptionalStringFlag(flags, 'comment'),
-        setup: getOptionalStringFlag(flags, 'setup'),
-        agent: 'codex',
-        managedAccount: {
-          provider: 'codex',
-          id: account.id,
-          label: account.workspaceLabel ?? account.email
+      // Why: a per-attempt mutation id lets the executor deduplicate transport-level retries of
+      // this start instead of silently spawning a second dispatch.
+      const startRequestId = `worker-supervise-${randomUUID()}`
+      const started = await client.call<WorkerStartReceipt>(
+        'orchestration.workerStart',
+        {
+          task,
+          on: getOptionalStringFlag(flags, 'on'),
+          worktree: getOptionalStringFlag(flags, 'worktree'),
+          name: getOptionalStringFlag(flags, 'name'),
+          repo: getOptionalStringFlag(flags, 'repo'),
+          baseBranch: getOptionalStringFlag(flags, 'base-branch'),
+          displayName: getOptionalStringFlag(flags, 'display-name'),
+          comment: getOptionalStringFlag(flags, 'comment'),
+          setup: getOptionalStringFlag(flags, 'setup'),
+          agent: 'codex',
+          managedAccount: {
+            provider: 'codex',
+            id: account.id,
+            label: account.workspaceLabel ?? account.email
+          },
+          model: getOptionalStringFlag(flags, 'model'),
+          effort: getOptionalStringFlag(flags, 'effort'),
+          retryOf,
+          timeoutMs: getOptionalPositiveIntegerValueFlag(flags, 'timeout-ms'),
+          run: getOptionalStringFlag(flags, 'run'),
+          from,
+          devMode: isDevCliInvocation()
         },
-        model: getOptionalStringFlag(flags, 'model'),
-        effort: getOptionalStringFlag(flags, 'effort'),
-        retryOf,
-        timeoutMs: getOptionalPositiveIntegerValueFlag(flags, 'timeout-ms'),
-        run: getOptionalStringFlag(flags, 'run'),
-        from,
-        devMode: isDevCliInvocation()
-      })
+        { orchestrationRequestId: startRequestId }
+      )
       const attempt = {
         accountId: account.id,
         accountLabel: account.workspaceLabel ?? null,
@@ -1068,9 +1120,22 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         if (started.result.lastError && isCodexQuotaExhaustedText(started.result.lastError)) {
           attempt.state = 'quota_exhausted'
           attempt.reason = 'provider_usage_limit'
-          await client.call('orchestration.workerRelease', {
+          const released = await client.call<WorkerReleaseReceipt>('orchestration.workerRelease', {
             dispatch: started.result.dispatchId
           })
+          if (!isSettledRelease(released.result.state)) {
+            process.exitCode = 1
+            printLocalResult(
+              {
+                state: 'release_unsettled',
+                release: released.result,
+                attempts
+              },
+              json,
+              `Worker ${started.result.dispatchId} could not be provably released (${released.result.state}); supervision stopped before starting another account.`
+            )
+            return
+          }
           retryOf = started.result.dispatchId
           continue
         }
@@ -1084,6 +1149,33 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         return
       }
 
+      // Why: select→start is not atomic — a concurrent `account select` (UI or another CLI) can
+      // change the active account between the readback and the spawn. The runtime records but does
+      // not pin `managedAccount`, so re-read after the start and fail closed on any mismatch
+      // instead of letting the acceptance receipt vouch for the wrong account.
+      const postStart = await client.call<{
+        codex: CodexRateLimitAccountsState
+      }>('accounts.list', {
+        refreshUsage: false
+      })
+      const postStartActiveId =
+        postStart.result.codex.activeAccountIdsByRuntime?.host ??
+        postStart.result.codex.activeAccountId
+      if (postStartActiveId !== account.id) {
+        attempt.state = 'account_mismatch_after_start'
+        attempt.reason = `active account changed to ${postStartActiveId ?? 'none'} during start`
+        await client.call('orchestration.workerStop', {
+          dispatch: started.result.dispatchId
+        })
+        process.exitCode = 1
+        printLocalResult(
+          { state: 'account_mismatch_after_start', attempts },
+          json,
+          `The active Codex account changed while worker ${started.result.dispatchId} was starting; the worker was stopped and retained for inspection because its true account cannot be proven.`
+        )
+        return
+      }
+
       while (Date.now() < deadline) {
         const [output, inbox, show] = await Promise.all([
           client.call<OrchestrationWorkerReadResult>('orchestration.workerRead', {
@@ -1091,11 +1183,15 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
             source: 'auto',
             limit: 100
           }),
+          // Why: `all` returns the full mailbox history without consuming it. The peek/unread pair
+          // only surfaces UNREAD messages, so a worker_done already read by any other consumer
+          // (another supervise, a manual `check`) would never be seen and supervise would spin to
+          // its timeout. The managed-account capability gate above guarantees a runtime that
+          // understands `all`.
           client.call<OrchestrationCheckOutput>('orchestration.check', {
             terminal: from,
             run: started.result.runId,
-            peek: true,
-            unread: false,
+            all: true,
             types: 'worker_done,escalation,question'
           }),
           client.call<WorkerShowReceipt>('orchestration.workerShow', {
@@ -1144,12 +1240,37 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         if (isCodexQuotaExhaustedRead(output.result)) {
           attempt.state = 'quota_exhausted'
           attempt.reason = 'provider_usage_limit'
-          await client.call('orchestration.workerStop', {
+          // Why: the next attempt may reuse the same worktree, so a worker that cannot be proven
+          // stopped AND released must halt supervision — two workers writing one tree is worse
+          // than a manual follow-up.
+          const stopped = await client.call<{ state: string }>('orchestration.workerStop', {
             dispatch: started.result.dispatchId
           })
-          await client.call('orchestration.workerRelease', {
+          if (stopped.result.state === 'stop_unknown') {
+            process.exitCode = 1
+            printLocalResult(
+              { state: 'stop_unsettled', stop: stopped.result, attempts },
+              json,
+              `Worker ${started.result.dispatchId} could not be provably stopped after quota exhaustion; supervision stopped before starting another account.`
+            )
+            return
+          }
+          const released = await client.call<WorkerReleaseReceipt>('orchestration.workerRelease', {
             dispatch: started.result.dispatchId
           })
+          if (!isSettledRelease(released.result.state)) {
+            process.exitCode = 1
+            printLocalResult(
+              {
+                state: 'release_unsettled',
+                release: released.result,
+                attempts
+              },
+              json,
+              `Worker ${started.result.dispatchId} could not be provably released (${released.result.state}); supervision stopped before starting another account.`
+            )
+            return
+          }
           retryOf = started.result.dispatchId
           break
         }
@@ -1165,7 +1286,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
           )
           return
         }
-        await sleep(pollMs)
+        // Why: cap the nap at the remaining budget so the overall deadline cannot overshoot by a
+        // full poll interval.
+        await sleep(Math.max(0, Math.min(pollMs, deadline - Date.now())))
       }
       if (attempt.state === 'quota_exhausted') {
         continue
@@ -1193,7 +1316,11 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
   'orchestration worker-show': async ({ flags, client, json }) => {
     const result = await client.call<{
       dispatch: { id: string; task_id: string; status: string }
-      worker: { state: string; stage: string; agent_terminal_handle: string | null }
+      worker: {
+        state: string
+        stage: string
+        agent_terminal_handle: string | null
+      }
     }>('orchestration.workerShow', {
       dispatch: getRequiredStringFlag(flags, 'dispatch')
     })
@@ -1314,23 +1441,30 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       worktreeCloseable,
       worktreeReason
     })
-    const acceptance = await client.call<OrchestrationSendResult>('orchestration.send', {
-      from,
-      to: `dispatch:${dispatchId}`,
-      run: shown.result.dispatch.run_id,
-      subject: 'Coordinator accepted worker result',
-      body:
-        `The coordinator accepted and took ownership of the result. ` +
-        `${worktreeCloseable ? 'The clean worktree may be closed by the coordinator.' : `The worktree remains retained: ${worktreeReason}.`}`,
-      type: 'status',
-      priority: 'normal',
-      payload
-    })
-    const release = await callMutation<WorkerReleaseReceipt>(
-      client,
-      flags,
+    // Why: the receipt write and the release are two mutations. Deriving two ids from one
+    // --retry-request keeps a rerun after a mid-flight crash from double-writing the acceptance
+    // receipt (the executor rejects one id reused across different methods).
+    const retryRequest = getOptionalStringFlag(flags, 'retry-request')
+    const acceptance = await client.call<OrchestrationSendResult>(
+      'orchestration.send',
+      {
+        from,
+        to: `dispatch:${dispatchId}`,
+        run: shown.result.dispatch.run_id,
+        subject: 'Coordinator accepted worker result',
+        body:
+          `The coordinator accepted and took ownership of the result. ` +
+          `${worktreeCloseable ? 'The clean worktree may be closed by the coordinator.' : `The worktree remains retained: ${worktreeReason}.`}`,
+        type: 'status',
+        priority: 'normal',
+        payload
+      },
+      retryRequest ? { orchestrationRequestId: `${retryRequest}:acceptance-send` } : undefined
+    )
+    const release = await client.call<WorkerReleaseReceipt>(
       'orchestration.workerRelease',
-      { dispatch: dispatchId }
+      { dispatch: dispatchId },
+      retryRequest ? { orchestrationRequestId: `${retryRequest}:release` } : undefined
     )
     if (release.result.state === 'release_unknown') {
       process.exitCode = 1
@@ -1614,7 +1748,12 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     // Why: named runs remain inspectable without a pane; only implicit runs resolve identity.
     const from = run ? undefined : await resolveCoordinatorTerminalHandle(flags, cwd, client)
     const result = await client.call<{
-      gates: { id: string; task_id: string; question: string; status: string }[]
+      gates: {
+        id: string
+        task_id: string
+        question: string
+        status: string
+      }[]
       count: number
       runId?: string
     }>('orchestration.gateList', {

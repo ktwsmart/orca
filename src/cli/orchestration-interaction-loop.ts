@@ -75,11 +75,14 @@ export function resolveCodexAccount(
   throw new Error(`Codex account selector "${selector}" did not match a managed account.`)
 }
 
+// Why: real provider strings carry suffixes ("You've hit your usage limit. Visit https://… or try
+// again at <date>.") and may use either apostrophe form, so the rules anchor the line start only.
+// Verified against a captured 2026-08 Codex provider sample; keep new patterns sample-backed.
 const QUOTA_LINES = [
-  /^usage limit reached\.?$/i,
-  /^you(?:'ve| have) hit your usage limit\.?$/i,
-  /^you(?:'ve| have) (?:run out of|used all) (?:your )?(?:codex )?(?:credits|usage)\.?$/i,
-  /^your (?:codex )?(?:usage|credit) limit has been reached\.?$/i
+  /^usage limit reached\b/i,
+  /^you(?:['’]ve| have) hit your usage limit\b/i,
+  /^you(?:['’]ve| have) (?:run out of|used all) (?:your )?(?:codex )?(?:credits|usage)\b/i,
+  /^your (?:codex )?(?:usage|credit) limit has been reached\b/i
 ]
 
 export function isCodexQuotaExhaustedText(text: string): boolean {
@@ -95,9 +98,12 @@ export function isCodexQuotaExhaustedRead(result: OrchestrationWorkerReadResult)
     // same words, so unstructured terminal text is never sufficient evidence to switch accounts.
     return false
   }
+  // Why: only system messages qualify — the runtime authors them from the provider's structured
+  // error fields (e.g. Codex task_complete.error). Assistant text is model output and can echo
+  // task material, so it is never provider evidence and must not trigger an account switch.
   return result.transcript.messages.some(
     (message) =>
-      (message.role === 'assistant' || message.role === 'system') &&
+      message.role === 'system' &&
       message.blocks.some((block) => block.type === 'text' && isCodexQuotaExhaustedText(block.text))
   )
 }
@@ -114,7 +120,15 @@ export function lifecycleMessageForDispatch(
       return false
     }
     try {
-      const payload = JSON.parse(message.payload) as { dispatchId?: unknown }
+      const payload = JSON.parse(message.payload) as {
+        dispatchId?: unknown
+        _orcaLifecycleRejection?: unknown
+      }
+      // Why: reconcile persists `_orcaLifecycleRejection` on duplicate/stale lifecycle messages;
+      // acting on one would report a settlement the runtime already refused.
+      if (payload._orcaLifecycleRejection) {
+        return false
+      }
       return payload.dispatchId === dispatchId
     } catch {
       return false
@@ -153,6 +167,15 @@ export function evaluateWorktreeClosure(status: GitStatusResult): {
   if (status.didHitLimit) {
     return { closeable: false, reason: 'git status was truncated' }
   }
+  // Why: a rebase/merge/cherry-pick can pause on a momentarily clean tree; the in-progress
+  // operation still owns the worktree. `unknown` is also the normal no-operation value, so only
+  // the three explicit operations block closure.
+  if (['merge', 'rebase', 'cherry-pick'].includes(status.conflictOperation)) {
+    return {
+      closeable: false,
+      reason: `a ${status.conflictOperation} operation is still in progress`
+    }
+  }
   if (status.entries.length > 0) {
     return {
       closeable: false,
@@ -161,6 +184,7 @@ export function evaluateWorktreeClosure(status: GitStatusResult): {
   }
   return {
     closeable: true,
-    reason: 'git worktree is clean; coordinator may archive or remove it explicitly'
+    reason:
+      'git worktree is clean; commits may still be unpushed, so the coordinator may archive or remove it only after confirming the branch is persisted'
   }
 }
