@@ -1136,11 +1136,17 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
           { orchestrationRequestId: startRequestId }
         )
       } catch (error) {
-        // Why: a RuntimeClientError is a definite server verdict (request_mismatch,
-        // invalid_argument, ledger operation_unknown guidance, …) — the reply was NOT lost, so
-        // blindly resending the same id would loop. Only transport-level failures qualify as a
-        // lost reply worth replaying.
-        if (error instanceof RuntimeClientError) {
+        // Why: RuntimeClientError carries both kinds of failure. Codes minted by the transport
+        // layer (timeout, unavailable, garbled response) mean the outcome is unknown and the
+        // byte-identical replay is safe; every other code is a definite server verdict
+        // (request_mismatch, invalid_argument, ledger guidance, …) that must not be replayed
+        // blindly.
+        const OUTCOME_UNKNOWN_CODES = [
+          'runtime_timeout',
+          'runtime_unavailable',
+          'invalid_runtime_response'
+        ]
+        if (error instanceof RuntimeClientError && !OUTCOME_UNKNOWN_CODES.includes(error.code)) {
           attempt.state = 'start_failed'
           attempt.reason = `${error.code}: ${error.message}`
           process.exitCode = 1
@@ -1157,8 +1163,32 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         attempt.reason = error instanceof Error ? error.message : String(error)
         process.exitCode = 1
         const remainingSelectors = selectors.slice(accountIndex).join(',')
+        // Why: the ledger hashes method + full params, so the replay must round-trip every
+        // originally-provided flag (plus the resolved coordinator handle) — dropping any of them
+        // would change the payload and turn the replay into a request_mismatch.
+        const passthroughFlags = [
+          'worktree',
+          'name',
+          'repo',
+          'base-branch',
+          'display-name',
+          'comment',
+          'setup',
+          'model',
+          'effort',
+          'timeout-ms',
+          'wait-timeout-ms',
+          'poll-ms',
+          'run'
+        ]
+        const passthrough = passthroughFlags
+          .map((flag) => {
+            const value = getOptionalStringFlag(flags, flag)
+            return value === undefined ? '' : ` --${flag} ${JSON.stringify(value)}`
+          })
+          .join('')
         const lineage = retryOf ? ` --retry-start-retry-of ${retryOf}` : ''
-        const recoveryCommand = `orca orchestration worker-supervise --task ${task} --accounts "${remainingSelectors}" --retry-start-request ${startRequestId}${lineage} --json`
+        const recoveryCommand = `orca orchestration worker-supervise --task ${JSON.stringify(task)} --accounts "${remainingSelectors}"${passthrough} --from ${from} --retry-start-request ${startRequestId}${lineage} --json`
         printLocalResult(
           { state: 'start_outcome_unknown', recoveryCommand, attempts },
           json,
