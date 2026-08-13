@@ -64,6 +64,10 @@ describe('orchestration workerStart managed-account pin', () => {
       bytesWritten: 1
     })
     vi.spyOn(runtime, 'isTerminalRunningAgent').mockResolvedValue(true)
+    vi.spyOn(runtime, 'closeTerminal').mockResolvedValue({
+      handle: 'term_worker',
+      closed: true
+    } as never)
     vi.spyOn(runtime, 'getExactWorkerProviderSession').mockReturnValue(null)
     vi.spyOn(runtime, 'notifyMessageArrived').mockImplementation(() => {})
     vi.spyOn(runtime, 'getCodexTerminalLaunchAccount').mockReturnValue(launchAccount)
@@ -113,12 +117,41 @@ describe('orchestration workerStart managed-account pin', () => {
     expect(startOptions.managedAccount?.id).toBe('account-3')
   })
 
-  it('PTY 實際啟動帳號不同（ABA 情境）即 start 失敗，不產生背書錯帳的回執', async () => {
+  it('PTY 實際啟動帳號不同（ABA 情境）即 start 失敗，自建終端即刻關閉', async () => {
     setup({ known: true, accountId: 'account-2' })
     const result = await startWorker({ provider: 'codex', id: 'account-3', label: 'Codex #3' })
     expect(result.state).not.toBe('ready')
     expect(result.failedStage).toBe('account_verification')
     expect(result.lastError).toContain('launched under Codex account account-2')
+    // 驗證失敗的新建終端不得存活成無主資源。
+    expect(runtime.closeTerminal).toHaveBeenCalledWith('term_worker')
+  })
+
+  it('managedAccount 禁止搭配非 codex agent', async () => {
+    setup({ known: true, accountId: 'account-3' })
+    const task = db.createTask({ spec: 'agent guard task', runId: activeRunId })
+    await expect(
+      call('orchestration.workerStart', {
+        task: task.id,
+        from: 'term_coord',
+        agent: 'claude',
+        managedAccount: { provider: 'codex', id: 'account-3', label: 'Codex #3' }
+      })
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
+  })
+
+  it('managedAccount 禁止搭配 reused terminal（spawn 後重啟的帳號無法佐證）', async () => {
+    setup({ known: true, accountId: 'account-3' })
+    const task = db.createTask({ spec: 'terminal guard task', runId: activeRunId })
+    await expect(
+      call('orchestration.workerStart', {
+        task: task.id,
+        from: 'term_coord',
+        agent: 'codex',
+        terminal: 'term_worker',
+        managedAccount: { provider: 'codex', id: 'account-3', label: 'Codex #3' }
+      })
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
   })
 
   it('登錄表無紀錄＝無法證明，fail-closed', async () => {

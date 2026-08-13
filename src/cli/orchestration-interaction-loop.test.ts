@@ -143,9 +143,22 @@ describe('Orca 完整互動循環', () => {
         entries: [],
         conflictOperation: 'unknown',
         didHitLimit: false,
+        head: 'abc1234def5678',
         upstreamStatus: pushedUpstream
       }).closeable
     ).toBe(true)
+    // 沒回報 HEAD SHA＝無法記錄被接手的狀態，不可關。
+    expect(
+      evaluateWorktreeClosure({
+        entries: [],
+        conflictOperation: 'unknown',
+        didHitLimit: false,
+        upstreamStatus: pushedUpstream
+      })
+    ).toEqual({
+      closeable: false,
+      reason: 'git status did not report a HEAD SHA, so the accepted state cannot be recorded'
+    })
     // 乾淨但未推送＝工作樹仍握有唯一副本，不可關。
     expect(
       evaluateWorktreeClosure({

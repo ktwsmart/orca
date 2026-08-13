@@ -202,6 +202,14 @@ export function evaluateWorktreeClosure(status: GitStatusResult): {
       reason: `branch is ahead of its upstream by ${upstream.ahead} unpushed commit(s)`
     }
   }
+  // Why: the acceptance receipt must record which HEAD SHA was accepted; a status without a HEAD
+  // (mixed-version host, incomplete result) cannot prove what would be closed, so it is retained.
+  if (!status.head) {
+    return {
+      closeable: false,
+      reason: 'git status did not report a HEAD SHA, so the accepted state cannot be recorded'
+    }
+  }
   return {
     closeable: true,
     reason:

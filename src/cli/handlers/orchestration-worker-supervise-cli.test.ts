@@ -701,4 +701,72 @@ describe('orchestration worker-supervise CLI contract', () => {
     expect(process.exitCode).toBe(1)
     logSpy.mockRestore()
   })
+
+  it('start 回覆遺失＝attempt 連同 startRequestId 留存，指引精確重放', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    callMock.mockImplementation((method: string) => {
+      if (method === 'status.get') {
+        return Promise.resolve({
+          result: { capabilities: [ORCHESTRATION_WORKER_MANAGED_ACCOUNT_RUNTIME_CAPABILITY] }
+        })
+      }
+      if (method === 'accounts.list') {
+        return Promise.resolve({
+          result: {
+            codex: {
+              accounts: [
+                { id: 'account-3', email: 'three@example.com', workspaceLabel: 'Codex #3' }
+              ],
+              activeAccountId: 'account-3'
+            }
+          }
+        })
+      }
+      if (method === 'accounts.selectCodex') {
+        return Promise.resolve({ result: { accounts: [], activeAccountId: 'account-3' } })
+      }
+      if (method === 'orchestration.workerStart') {
+        return Promise.reject(new Error('socket closed before the response arrived'))
+      }
+      throw new Error(`Unexpected method ${method}`)
+    })
+
+    await ORCHESTRATION_HANDLERS['orchestration worker-supervise']({
+      flags: new Map([
+        ['task', 'task-1'],
+        ['accounts', '#3'],
+        ['from', 'term-coordinator']
+      ]),
+      client: { call: callMock },
+      cwd: '/tmp/repo',
+      json: true
+    } as never)
+
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"state": "start_outcome_unknown"'))
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"startRequestId"'))
+    expect(process.exitCode).toBe(1)
+    logSpy.mockRestore()
+  })
+
+  it('--retry-start-request 讓第一個 attempt 重用原 mutation id（同 payload 命中原回執）', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    callMock.mockImplementation(quotaScenarioMock({}))
+    await ORCHESTRATION_HANDLERS['orchestration worker-supervise']({
+      flags: new Map([
+        ['task', 'task-1'],
+        ['accounts', '#3,#2'],
+        ['from', 'term-coordinator'],
+        ['retry-start-request', 'recover-original-start-id']
+      ]),
+      client: { call: callMock },
+      cwd: '/tmp/repo',
+      json: true
+    } as never)
+
+    const starts = callMock.mock.calls.filter(([method]) => method === 'orchestration.workerStart')
+    expect(starts[0]?.[2]).toEqual({ orchestrationRequestId: 'recover-original-start-id' })
+    // 第二 attempt（遞補）必須換新 id，不得沿用恢復 id。
+    expect(starts[1]?.[2]).not.toEqual({ orchestrationRequestId: 'recover-original-start-id' })
+    logSpy.mockRestore()
+  })
 })

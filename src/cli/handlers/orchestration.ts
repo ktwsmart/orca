@@ -1048,9 +1048,10 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     const attempts: {
       accountId: string
       accountLabel: string | null
-      dispatchId: string
-      // Why: printed durably so an unknown start outcome can be recovered exactly via
-      // `worker-start --retry-request <startRequestId>` instead of spawning a second Dispatch.
+      dispatchId: string | null
+      // Why: printed durably so a lost start response can be recovered exactly by rerunning the
+      // same worker-supervise with --retry-start-request <startRequestId> — identical payload,
+      // same ledger receipt, no second Dispatch.
       startRequestId: string
       state: string
       reason?: string
@@ -1088,45 +1089,68 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         return
       }
       // Why: a per-attempt mutation id lets the executor deduplicate transport-level retries of
-      // this start instead of silently spawning a second dispatch.
-      const startRequestId = `worker-supervise-${randomUUID()}`
-      const started = await client.call<WorkerStartReceipt>(
-        'orchestration.workerStart',
-        {
-          task,
-          on: getOptionalStringFlag(flags, 'on'),
-          worktree: getOptionalStringFlag(flags, 'worktree'),
-          name: getOptionalStringFlag(flags, 'name'),
-          repo: getOptionalStringFlag(flags, 'repo'),
-          baseBranch: getOptionalStringFlag(flags, 'base-branch'),
-          displayName: getOptionalStringFlag(flags, 'display-name'),
-          comment: getOptionalStringFlag(flags, 'comment'),
-          setup: getOptionalStringFlag(flags, 'setup'),
-          agent: 'codex',
-          managedAccount: {
-            provider: 'codex',
-            id: account.id,
-            label: account.workspaceLabel ?? account.email
-          },
-          model: getOptionalStringFlag(flags, 'model'),
-          effort: getOptionalStringFlag(flags, 'effort'),
-          retryOf,
-          timeoutMs: getOptionalPositiveIntegerValueFlag(flags, 'timeout-ms'),
-          run: getOptionalStringFlag(flags, 'run'),
-          from,
-          devMode: isDevCliInvocation()
-        },
-        { orchestrationRequestId: startRequestId }
-      )
+      // this start instead of silently spawning a second dispatch. --retry-start-request replays
+      // the first attempt with the exact original id (and identical payload) after a lost reply.
+      const startRequestId =
+        (attempts.length === 0 ? getOptionalStringFlag(flags, 'retry-start-request') : undefined) ??
+        `worker-supervise-${randomUUID()}`
       const attempt = {
         accountId: account.id,
         accountLabel: account.workspaceLabel ?? null,
-        dispatchId: started.result.dispatchId,
+        dispatchId: null as string | null,
         startRequestId,
-        state: started.result.state,
-        ...(started.result.lastError ? { reason: started.result.lastError } : {})
-      }
+        state: 'starting'
+      } as (typeof attempts)[number]
       attempts.push(attempt)
+      let started: Awaited<ReturnType<typeof client.call<WorkerStartReceipt>>>
+      try {
+        started = await client.call<WorkerStartReceipt>(
+          'orchestration.workerStart',
+          {
+            task,
+            on: getOptionalStringFlag(flags, 'on'),
+            worktree: getOptionalStringFlag(flags, 'worktree'),
+            name: getOptionalStringFlag(flags, 'name'),
+            repo: getOptionalStringFlag(flags, 'repo'),
+            baseBranch: getOptionalStringFlag(flags, 'base-branch'),
+            displayName: getOptionalStringFlag(flags, 'display-name'),
+            comment: getOptionalStringFlag(flags, 'comment'),
+            setup: getOptionalStringFlag(flags, 'setup'),
+            agent: 'codex',
+            managedAccount: {
+              provider: 'codex',
+              id: account.id,
+              label: account.workspaceLabel ?? account.email
+            },
+            model: getOptionalStringFlag(flags, 'model'),
+            effort: getOptionalStringFlag(flags, 'effort'),
+            retryOf,
+            timeoutMs: getOptionalPositiveIntegerValueFlag(flags, 'timeout-ms'),
+            run: getOptionalStringFlag(flags, 'run'),
+            from,
+            devMode: isDevCliInvocation()
+          },
+          { orchestrationRequestId: startRequestId }
+        )
+      } catch (error) {
+        // Why: a thrown call means the runtime may or may not have accepted the start. The attempt
+        // (with its exact request id) must survive in the durable output so recovery can replay
+        // the identical mutation instead of guessing.
+        attempt.state = 'start_outcome_unknown'
+        attempt.reason = error instanceof Error ? error.message : String(error)
+        process.exitCode = 1
+        printLocalResult(
+          { state: 'start_outcome_unknown', attempts },
+          json,
+          `The start for account ${account.id} did not return a receipt. Rerun the same worker-supervise with --retry-start-request ${startRequestId} to recover the exact same start without spawning a second Dispatch.`
+        )
+        return
+      }
+      attempt.dispatchId = started.result.dispatchId
+      attempt.state = started.result.state
+      if (started.result.lastError) {
+        attempt.reason = started.result.lastError
+      }
       if (started.result.state !== 'ready') {
         if (started.result.lastError && isCodexQuotaExhaustedText(started.result.lastError)) {
           attempt.state = 'quota_exhausted'
@@ -1387,8 +1411,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       'orchestration.workerRelease',
       { dispatch: getRequiredStringFlag(flags, 'dispatch') }
     )
-    // Why: only an unprovable close is a failure; retained/pending/already-released are settled answers.
-    if (result.result.state === 'release_unknown') {
+    // Why: retained/already_released are settled answers; release_pending and release_unknown
+    // both leave a recovery obligation, so they must not exit 0 as if the terminal were gone.
+    if (result.result.state === 'release_unknown' || result.result.state === 'release_pending') {
       process.exitCode = 1
     }
     printResult(result, json, formatWorkerRelease)
@@ -1440,22 +1465,28 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       getOptionalStringFlag(flags, 'retry-release-request') ??
       // Legacy alias: --retry-request predates the two-phase flags and always meant the release.
       getOptionalStringFlag(flags, 'retry-request')
-    const acceptance = await client.call<OrchestrationSendResult>(
-      'orchestration.send',
-      {
-        from,
-        to: `dispatch:${dispatchId}`,
-        run: shown.result.dispatch.run_id,
-        subject: 'Coordinator accepted worker result',
-        body:
-          `The coordinator accepted and took ownership of the result. ` +
-          `${worktreeCloseable ? 'The clean worktree may be closed by the coordinator.' : `The worktree remains retained: ${worktreeReason}.`}`,
-        type: 'status',
-        priority: 'normal',
-        payload
-      },
-      retrySendRequest ? { orchestrationRequestId: retrySendRequest } : undefined
-    )
+    // Why: release-only recovery means the acceptance receipt already landed durably and only the
+    // release outcome is unknown. Re-sending with a fresh id would write a duplicate receipt, so
+    // the send is skipped unless its own retry id says it also needs recovery.
+    const releaseOnlyRecovery = Boolean(retryReleaseRequest) && !retrySendRequest
+    const acceptance = releaseOnlyRecovery
+      ? null
+      : await client.call<OrchestrationSendResult>(
+          'orchestration.send',
+          {
+            from,
+            to: `dispatch:${dispatchId}`,
+            run: shown.result.dispatch.run_id,
+            subject: 'Coordinator accepted worker result',
+            body:
+              `The coordinator accepted and took ownership of the result. ` +
+              `${worktreeCloseable ? 'The clean worktree may be closed by the coordinator.' : `The worktree remains retained: ${worktreeReason}.`}`,
+            type: 'status',
+            priority: 'normal',
+            payload
+          },
+          retrySendRequest ? { orchestrationRequestId: retrySendRequest } : undefined
+        )
     const release = await client.call<WorkerReleaseReceipt>(
       'orchestration.workerRelease',
       { dispatch: dispatchId },

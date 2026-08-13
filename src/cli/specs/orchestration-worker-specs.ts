@@ -42,7 +42,7 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
     path: ['orchestration', 'worker-supervise'],
     summary: 'Run a Codex worker with ordered account failover until completion or attention',
     usage:
-      'orca orchestration worker-supervise --task <task_id> [--accounts <id|email|label|#number,...>] [worker-start flags] [--wait-timeout-ms <n>] [--poll-ms <n>] [--json]',
+      'orca orchestration worker-supervise --task <task_id> [--accounts <id|email|label|#number,...>] [worker-start flags] [--wait-timeout-ms <n>] [--poll-ms <n>] [--retry-start-request <id>] [--json]',
     allowedFlags: [
       ...GLOBAL_FLAGS,
       'task',
@@ -60,11 +60,13 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
       'timeout-ms',
       'wait-timeout-ms',
       'poll-ms',
+      'retry-start-request',
       'run',
       'from'
     ],
     notes: [
       'Uses Codex managed accounts only. Without --accounts, unique numbered labels are tried from highest to lowest (#3, #2, #1).',
+      'A lost start reply prints the attempt with its exact startRequestId and exits 1; rerun the identical worker-supervise with --retry-start-request <id> to replay the same start mutation without spawning a second Dispatch.',
       'Managed account selection is local to one Orca runtime, so --on is rejected. Run this command on the worker server instead.',
       'A provider-authored usage-limit message fences and releases that exact attempt, then creates a new Dispatch linked by retryOf under the next account.',
       'Questions and escalations stop the loop for coordinator attention. worker_done returns awaiting_acceptance; it does not auto-accept the result.',
@@ -117,7 +119,7 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
       'Post-completion cleanup for a settled (succeeded or failed) worker; closes only the exact coordinator-owned agent terminal of that worker.',
       'An inspectable output archive is preserved before the terminal closes, so worker-read still returns output afterwards.',
       'Never closes setup terminals, configured tabs, reused or pre-existing terminals, user-taken-over terminals, or unproven identities.',
-      'Idempotent: repeating the call reports already_released. Only release_unknown exits 1; retained, release_pending, and already_released exit 0.'
+      'Idempotent: repeating the call reports already_released. release_unknown and release_pending exit 1 (a recovery obligation remains); retained and already_released exit 0.'
     ]
   },
   {
@@ -138,6 +140,7 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
       'Requires a succeeded worker_done settlement. Acceptance is a separate durable coordinator decision.',
       'Checks the exact worktree through git.status. Dirty, in-progress-operation, truncated, or unpushed status is retained as not closeable; the acceptance receipt records the worktree HEAD SHA.',
       'Two independent mutations: pass the exact reported id back through --retry-send-request (acceptance receipt) or --retry-release-request (terminal release). --retry-request stays a legacy alias for the release id.',
+      'Release-only recovery (--retry-release-request without --retry-send-request) skips the acceptance send entirely — the receipt already landed durably, and re-sending would duplicate it.',
       'Only released/already_released report accepted with exit 0; release_pending and release_unknown exit 1 with the recovery obligation preserved.',
       'Archives and releases only the exact worker terminal after the receipt is written. The worktree is never deleted.'
     ]
