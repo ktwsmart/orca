@@ -210,6 +210,23 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
               : `Agent did not become ready (${wait.status}).`
           )
         }
+        if (params.managedAccount) {
+          // Why: the pane account registry records the CODEX_HOME actually baked into the PTY at
+          // spawn — the only evidence immune to a select→start ABA race. A receipt must never
+          // vouch for an account the worker did not launch under, so unprovable is a failure.
+          failedStage = 'account_verification'
+          const launchAccount = runtime.getCodexTerminalLaunchAccount(terminalHandle)
+          if (!launchAccount.known) {
+            throw new Error(
+              `Worker terminal ${terminalHandle} has no recorded Codex launch account, so the requested managed account ${params.managedAccount.id} cannot be proven.`
+            )
+          }
+          if (launchAccount.accountId !== params.managedAccount.id) {
+            throw new Error(
+              `Worker terminal ${terminalHandle} launched under Codex account ${launchAccount.accountId ?? 'system-default'}, not the requested managed account ${params.managedAccount.id}.`
+            )
+          }
+        }
         const terminalAuthority = requireWorkerAuthority(runtime, terminalHandle)
         const capability = db.prepareStartingWorkerAuthority({
           dispatchId: started.dispatch.id,

@@ -271,8 +271,8 @@ describe('orchestration skill guidance', () => {
     expect(agentGuidance).toContain('review and accept succeeded results with `worker-accept`')
     expect(agentGuidance).toContain('released workers remain readable through `worker-read`')
     expect(nextAction).toContain(
-      "Only the acceptance receipt's complete clean Git check can mark a worktree closeable, and " +
-        'it never removes the worktree.'
+      "Only the acceptance receipt's complete clean-and-pushed Git check can mark a worktree " +
+        'closeable, and it never removes the worktree.'
     )
   })
 
@@ -286,7 +286,12 @@ describe('orchestration skill guidance', () => {
     expect(workerLoop).toContain('`worker-supervise` rejects `--on`')
     expect(workerLoop).toContain('verifies the selected account readback')
     expect(workerLoop).toContain('returns `awaiting_acceptance`')
-    expect(workerLoop).toContain('it always says `removed: false`')
+    expect(workerLoop).toContain('always says `removed: false`')
+    expect(workerLoop).toContain('records the worktree HEAD SHA')
+    expect(workerLoop).toContain('release_pending and release_unknown exit 1')
+    expect(workerLoop).toContain(
+      'proves the actual launch account from the PTY launch-account registry'
+    )
     expect(workerLoop).toContain('never treats `worker_done` alone as permission to delete it')
   })
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  boundedPollDelayMs,
   buildAcceptancePayload,
   evaluateWorktreeClosure,
   isCodexQuotaExhaustedRead,
@@ -115,28 +116,56 @@ describe('Orca 完整互動循環', () => {
     ).toBe(false)
   })
 
-  it('驗收回執明示不刪工作樹', () => {
+  it('驗收回執明示不刪工作樹，並記錄被接手的 SHA', () => {
     const payload = JSON.parse(
       buildAcceptancePayload({
         taskId: 'task-1',
         dispatchId: 'dispatch-1',
         evidence: 'tests pass',
         worktreeCloseable: true,
-        worktreeReason: 'clean'
+        worktreeReason: 'clean',
+        worktreeSha: 'abc1234def'
       })
     )
     expect(payload.outcome).toBe('accepted')
-    expect(payload.worktree).toEqual({ closeable: true, reason: 'clean', removed: false })
+    expect(payload.worktree).toEqual({
+      closeable: true,
+      reason: 'clean',
+      sha: 'abc1234def',
+      removed: false
+    })
   })
 
-  it('只有完整且乾淨的 Git 狀態才能標記工作樹可關閉', () => {
+  it('只有完整、乾淨且已推送落地的 Git 狀態才能標記工作樹可關閉', () => {
+    const pushedUpstream = { hasUpstream: true, ahead: 0, behind: 0 }
+    expect(
+      evaluateWorktreeClosure({
+        entries: [],
+        conflictOperation: 'unknown',
+        didHitLimit: false,
+        upstreamStatus: pushedUpstream
+      }).closeable
+    ).toBe(true)
+    // 乾淨但未推送＝工作樹仍握有唯一副本，不可關。
+    expect(
+      evaluateWorktreeClosure({
+        entries: [],
+        conflictOperation: 'unknown',
+        didHitLimit: false,
+        upstreamStatus: { hasUpstream: true, ahead: 2, behind: 0 }
+      })
+    ).toEqual({
+      closeable: false,
+      reason: 'branch is ahead of its upstream by 2 unpushed commit(s)'
+    })
+    // 沒有 upstream＝commit 未持久化到遠端，不可關。
     expect(
       evaluateWorktreeClosure({
         entries: [],
         conflictOperation: 'unknown',
         didHitLimit: false
       }).closeable
-    ).toBe(true)
+    ).toBe(false)
     // rebase/merge/cherry-pick 停在乾淨中間點時，工作樹仍被進行中的操作佔有。
     for (const conflictOperation of ['merge', 'rebase', 'cherry-pick'] as const) {
       expect(
@@ -160,5 +189,12 @@ describe('Orca 完整互動循環', () => {
         didHitLimit: true
       })
     ).toEqual({ closeable: false, reason: 'git status was truncated' })
+  })
+
+  it('sleep 封頂：不超過剩餘期限且不為負', () => {
+    expect(boundedPollDelayMs(2000, 10_000, 5_000)).toBe(2000)
+    expect(boundedPollDelayMs(2000, 6_500, 5_000)).toBe(1500)
+    expect(boundedPollDelayMs(2000, 5_000, 5_000)).toBe(0)
+    expect(boundedPollDelayMs(2000, 4_000, 5_000)).toBe(0)
   })
 })

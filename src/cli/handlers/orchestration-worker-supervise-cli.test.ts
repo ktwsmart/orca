@@ -131,7 +131,10 @@ describe('orchestration worker-supervise CLI contract', () => {
             }
           })
         }
-        if (method === 'orchestration.workerStop' || method === 'orchestration.workerRelease') {
+        if (method === 'orchestration.workerStop') {
+          return Promise.resolve({ result: { state: 'stopped' } })
+        }
+        if (method === 'orchestration.workerRelease') {
           return Promise.resolve({ result: { state: 'released' } })
         }
         throw new Error(`Unexpected method ${method}`)
@@ -165,6 +168,8 @@ describe('orchestration worker-supervise CLI contract', () => {
     expect(checkCall?.[1]).toEqual(expect.objectContaining({ all: true }))
     expect(checkCall?.[1]).not.toHaveProperty('peek')
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"state": "awaiting_acceptance"'))
+    // 每個 attempt 都要留下可精確恢復的 startRequestId。
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"startRequestId"'))
     expect(process.exitCode).toBeUndefined()
     logSpy.mockRestore()
   })
@@ -231,7 +236,10 @@ describe('orchestration worker-supervise CLI contract', () => {
           result: { dispatch: { status: 'dispatched' }, worker: { state: 'active' } }
         })
       }
-      if (method === 'orchestration.workerStop' || method === 'orchestration.workerRelease') {
+      if (method === 'orchestration.workerStop') {
+        return Promise.resolve({ result: { state: 'stopped' } })
+      }
+      if (method === 'orchestration.workerRelease') {
         return Promise.resolve({ result: { state: 'released' } })
       }
       throw new Error(`Unexpected method ${method}`)
@@ -382,9 +390,8 @@ describe('orchestration worker-supervise CLI contract', () => {
     ).toHaveLength(0)
   })
 
-  it('stops and retains the worker when the active account changes during start', async () => {
+  it('runtime 帳號 pin 失敗（含 ABA 情境）＝start 失敗，不切帳、不背書', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
-    let listCount = 0
     callMock.mockImplementation((method: string) => {
       if (method === 'status.get') {
         return Promise.resolve({
@@ -392,7 +399,6 @@ describe('orchestration worker-supervise CLI contract', () => {
         })
       }
       if (method === 'accounts.list') {
-        listCount += 1
         return Promise.resolve({
           result: {
             codex: {
@@ -400,8 +406,7 @@ describe('orchestration worker-supervise CLI contract', () => {
                 { id: 'account-3', email: 'three@example.com', workspaceLabel: 'Codex #3' },
                 { id: 'account-2', email: 'two@example.com', workspaceLabel: 'Codex #2' }
               ],
-              // 第二次讀回（start 後複驗）模擬被併發呼叫者換掉帳號。
-              activeAccountId: listCount === 1 ? 'account-3' : 'account-2'
+              activeAccountId: 'account-3'
             }
           }
         })
@@ -410,12 +415,18 @@ describe('orchestration worker-supervise CLI contract', () => {
         return Promise.resolve({ result: { accounts: [], activeAccountId: 'account-3' } })
       }
       if (method === 'orchestration.workerStart') {
+        // runtime 端 PTY 登錄表 pin 驗證失敗（例如 ABA：實際以 account-2 啟動）。
         return Promise.resolve({
-          result: { runId: 'run-1', taskId: 'task-1', dispatchId: 'dispatch-3', state: 'ready' }
+          result: {
+            runId: 'run-1',
+            taskId: 'task-1',
+            dispatchId: 'dispatch-3',
+            state: 'failed',
+            failedStage: 'account_verification',
+            lastError:
+              'Worker terminal term-worker launched under Codex account account-2, not the requested managed account account-3.'
+          }
         })
-      }
-      if (method === 'orchestration.workerStop') {
-        return Promise.resolve({ result: { state: 'stopped' } })
       }
       throw new Error(`Unexpected method ${method}`)
     })
@@ -431,13 +442,11 @@ describe('orchestration worker-supervise CLI contract', () => {
       json: true
     } as never)
 
-    expect(callMock).toHaveBeenCalledWith('orchestration.workerStop', { dispatch: 'dispatch-3' })
+    // 帳號驗證失敗不是額度證據 → 不得切到下一帳號。
     expect(
       callMock.mock.calls.filter(([method]) => method === 'accounts.selectCodex')
     ).toHaveLength(1)
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining('"state": "account_mismatch_after_start"')
-    )
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"state": "start_failed"'))
     expect(process.exitCode).toBe(1)
     logSpy.mockRestore()
   })
@@ -521,6 +530,174 @@ describe('orchestration worker-supervise CLI contract', () => {
       callMock.mock.calls.filter(([method]) => method === 'orchestration.workerStart')
     ).toHaveLength(1)
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"state": "release_unsettled"'))
+    expect(process.exitCode).toBe(1)
+    logSpy.mockRestore()
+  })
+
+  const quotaScenarioMock = (overrides: {
+    stopState?: string
+    releaseState?: string
+    selectSecondActive?: string
+  }) => {
+    let startCount = 0
+    let activeAccountId = 'account-3'
+    return (method: string, params: { dispatch?: string; accountId?: string }) => {
+      if (method === 'status.get') {
+        return Promise.resolve({
+          result: { capabilities: [ORCHESTRATION_WORKER_MANAGED_ACCOUNT_RUNTIME_CAPABILITY] }
+        })
+      }
+      if (method === 'accounts.list') {
+        return Promise.resolve({
+          result: {
+            codex: {
+              accounts: [
+                { id: 'account-3', email: 'three@example.com', workspaceLabel: 'Codex #3' },
+                { id: 'account-2', email: 'two@example.com', workspaceLabel: 'Codex #2' }
+              ],
+              activeAccountId
+            }
+          }
+        })
+      }
+      if (method === 'accounts.selectCodex') {
+        const isSecond = params.accountId === 'account-2'
+        activeAccountId =
+          isSecond && overrides.selectSecondActive
+            ? overrides.selectSecondActive
+            : (params.accountId ?? activeAccountId)
+        return Promise.resolve({ result: { accounts: [], activeAccountId } })
+      }
+      if (method === 'orchestration.workerStart') {
+        startCount += 1
+        return Promise.resolve({
+          result: {
+            runId: 'run-1',
+            taskId: 'task-1',
+            dispatchId: startCount === 1 ? 'dispatch-3' : 'dispatch-2',
+            state: 'ready'
+          }
+        })
+      }
+      if (method === 'orchestration.workerRead') {
+        const quota = params.dispatch === 'dispatch-3'
+        return Promise.resolve({
+          result: {
+            dispatchId: params.dispatch,
+            source: 'transcript',
+            transcript: {
+              messages: quota
+                ? [{ role: 'system', blocks: [{ type: 'text', text: 'Usage limit reached.' }] }]
+                : [],
+              nextCursor: null
+            }
+          }
+        })
+      }
+      if (method === 'orchestration.check') {
+        return Promise.resolve({
+          result: {
+            messages:
+              startCount === 2
+                ? [
+                    {
+                      id: 'message-done',
+                      type: 'worker_done',
+                      subject: 'Worker completed',
+                      payload: JSON.stringify({
+                        taskId: 'task-1',
+                        dispatchId: 'dispatch-2',
+                        outcome: 'succeeded'
+                      })
+                    }
+                  ]
+                : []
+          }
+        })
+      }
+      if (method === 'orchestration.workerShow') {
+        return Promise.resolve({
+          result: {
+            dispatch: {
+              id: params.dispatch,
+              task_id: 'task-1',
+              run_id: 'run-1',
+              status: params.dispatch === 'dispatch-2' ? 'completed' : 'dispatched'
+            },
+            worker: {
+              state: params.dispatch === 'dispatch-2' ? 'succeeded' : 'active',
+              stage: 'running',
+              agent_terminal_handle: 'term-worker'
+            }
+          }
+        })
+      }
+      if (method === 'orchestration.workerStop') {
+        return Promise.resolve({ result: { state: overrides.stopState ?? 'stopped' } })
+      }
+      if (method === 'orchestration.workerRelease') {
+        return Promise.resolve({ result: { state: overrides.releaseState ?? 'released' } })
+      }
+      throw new Error(`Unexpected method ${method}`)
+    }
+  }
+
+  const runSupervise = () =>
+    ORCHESTRATION_HANDLERS['orchestration worker-supervise']({
+      flags: new Map([
+        ['task', 'task-1'],
+        ['accounts', '#3,#2'],
+        ['from', 'term-coordinator']
+      ]),
+      client: { call: callMock },
+      cwd: '/tmp/repo',
+      json: true
+    } as never)
+
+  it('quota 後 stop_unknown＝無法證明停止，中止監督不燒下一帳號', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    callMock.mockImplementation(quotaScenarioMock({ stopState: 'stop_unknown' }))
+    await runSupervise()
+    expect(
+      callMock.mock.calls.filter(([method]) => method === 'orchestration.workerStart')
+    ).toHaveLength(1)
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"state": "stop_unsettled"'))
+    expect(process.exitCode).toBe(1)
+    logSpy.mockRestore()
+  })
+
+  it('quota 後 release_unknown＝未落定，中止監督', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    callMock.mockImplementation(quotaScenarioMock({ releaseState: 'release_unknown' }))
+    await runSupervise()
+    expect(
+      callMock.mock.calls.filter(([method]) => method === 'orchestration.workerStart')
+    ).toHaveLength(1)
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"state": "release_unsettled"'))
+    expect(process.exitCode).toBe(1)
+    logSpy.mockRestore()
+  })
+
+  it('quota 後 already_released 視為已落定，正常遞補到下一帳號', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    callMock.mockImplementation(quotaScenarioMock({ releaseState: 'already_released' }))
+    await runSupervise()
+    expect(
+      callMock.mock.calls.filter(([method]) => method === 'orchestration.workerStart')
+    ).toHaveLength(2)
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"state": "awaiting_acceptance"'))
+    expect(process.exitCode).toBeUndefined()
+    logSpy.mockRestore()
+  })
+
+  it('第二帳號 select 讀回不符時，第一個 attempt 證據仍完整輸出', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    callMock.mockImplementation(quotaScenarioMock({ selectSecondActive: 'account-3' }))
+    await runSupervise()
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('"state": "account_select_unconfirmed"')
+    )
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('"dispatchId": "dispatch-3"'))
     expect(process.exitCode).toBe(1)
     logSpy.mockRestore()
   })

@@ -144,6 +144,7 @@ export function buildAcceptancePayload(input: {
   accountLabel?: string | null
   worktreeCloseable: boolean
   worktreeReason: string
+  worktreeSha?: string | null
 }): string {
   return JSON.stringify({
     taskId: input.taskId,
@@ -155,6 +156,8 @@ export function buildAcceptancePayload(input: {
     worktree: {
       closeable: input.worktreeCloseable,
       reason: input.worktreeReason,
+      // Why: the receipt must answer "which SHA was accepted" without the worktree surviving.
+      sha: input.worktreeSha ?? null,
       removed: false
     }
   })
@@ -182,9 +185,31 @@ export function evaluateWorktreeClosure(status: GitStatusResult): {
       reason: `worktree has ${status.entries.length} uncommitted change(s)`
     }
   }
+  // Why: the authority contract marks a worktree closeable only when its commits are persisted
+  // (pushed branch or PR). A clean tree with unpushed commits still holds the only copy of the
+  // work, so the boolean must stay false — a reason-string warning is not machine-readable.
+  const upstream = status.upstreamStatus
+  if (!upstream?.hasUpstream) {
+    return {
+      closeable: false,
+      reason:
+        'branch has no upstream; commits are not persisted remotely, so the worktree must be retained'
+    }
+  }
+  if (upstream.ahead > 0) {
+    return {
+      closeable: false,
+      reason: `branch is ahead of its upstream by ${upstream.ahead} unpushed commit(s)`
+    }
+  }
   return {
     closeable: true,
     reason:
-      'git worktree is clean; commits may still be unpushed, so the coordinator may archive or remove it only after confirming the branch is persisted'
+      'git worktree is clean and its branch is fully pushed; the coordinator may archive or remove it explicitly'
   }
+}
+
+// Why: pure so the deadline-capping arithmetic is unit-testable without driving the poll loop.
+export function boundedPollDelayMs(pollMs: number, deadline: number, now: number): number {
+  return Math.max(0, Math.min(pollMs, deadline - now))
 }

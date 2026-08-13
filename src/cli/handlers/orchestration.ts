@@ -46,7 +46,8 @@ import {
   isCodexQuotaExhaustedRead,
   lifecycleMessageForDispatch,
   parseAccountOrder,
-  resolveCodexAccount
+  resolveCodexAccount,
+  boundedPollDelayMs
 } from '../orchestration-interaction-loop'
 
 // Why: 15 s is well under Claude Code's ~2 min Bash-tool silence budget while keeping log volume low. See design doc §3.4.
@@ -409,6 +410,12 @@ function rejectLifecycleGroupRecipient(type: string | undefined, to: string): vo
 // `release_unknown` leave a possibly-live worker, so automated flows must not build on them.
 function isSettledRelease(state: string): boolean {
   return state === 'released' || state === 'already_released'
+}
+
+// Why: only these dispatch states prove the worker process is no longer running; `stopping`,
+// `stop_unknown`, and any pre-terminal state may leave a live worker behind.
+function isSettledStop(state: string): boolean {
+  return ['stopped', 'succeeded', 'failed', 'abandoned'].includes(state)
 }
 
 function callMutation<TResult>(
@@ -1042,6 +1049,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       accountId: string
       accountLabel: string | null
       dispatchId: string
+      // Why: printed durably so an unknown start outcome can be recovered exactly via
+      // `worker-start --retry-request <startRequestId>` instead of spawning a second Dispatch.
+      startRequestId: string
       state: string
       reason?: string
     }[] = []
@@ -1112,6 +1122,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         accountId: account.id,
         accountLabel: account.workspaceLabel ?? null,
         dispatchId: started.result.dispatchId,
+        startRequestId,
         state: started.result.state,
         ...(started.result.lastError ? { reason: started.result.lastError } : {})
       }
@@ -1149,33 +1160,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         return
       }
 
-      // Why: select→start is not atomic — a concurrent `account select` (UI or another CLI) can
-      // change the active account between the readback and the spawn. The runtime records but does
-      // not pin `managedAccount`, so re-read after the start and fail closed on any mismatch
-      // instead of letting the acceptance receipt vouch for the wrong account.
-      const postStart = await client.call<{
-        codex: CodexRateLimitAccountsState
-      }>('accounts.list', {
-        refreshUsage: false
-      })
-      const postStartActiveId =
-        postStart.result.codex.activeAccountIdsByRuntime?.host ??
-        postStart.result.codex.activeAccountId
-      if (postStartActiveId !== account.id) {
-        attempt.state = 'account_mismatch_after_start'
-        attempt.reason = `active account changed to ${postStartActiveId ?? 'none'} during start`
-        await client.call('orchestration.workerStop', {
-          dispatch: started.result.dispatchId
-        })
-        process.exitCode = 1
-        printLocalResult(
-          { state: 'account_mismatch_after_start', attempts },
-          json,
-          `The active Codex account changed while worker ${started.result.dispatchId} was starting; the worker was stopped and retained for inspection because its true account cannot be proven.`
-        )
-        return
-      }
-
+      // Why: account identity is proven runtime-side — workerStart consults the PTY launch-account
+      // registry (immune to select→start ABA races) and fails the start whenever the requested
+      // managed account cannot be proven, so a non-ready receipt above already covers mismatch.
       while (Date.now() < deadline) {
         const [output, inbox, show] = await Promise.all([
           client.call<OrchestrationWorkerReadResult>('orchestration.workerRead', {
@@ -1246,7 +1233,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
           const stopped = await client.call<{ state: string }>('orchestration.workerStop', {
             dispatch: started.result.dispatchId
           })
-          if (stopped.result.state === 'stop_unknown') {
+          if (!isSettledStop(stopped.result.state)) {
             process.exitCode = 1
             printLocalResult(
               { state: 'stop_unsettled', stop: stopped.result, attempts },
@@ -1288,7 +1275,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         }
         // Why: cap the nap at the remaining budget so the overall deadline cannot overshoot by a
         // full poll interval.
-        await sleep(Math.max(0, Math.min(pollMs, deadline - Date.now())))
+        await sleep(boundedPollDelayMs(pollMs, deadline, Date.now()))
       }
       if (attempt.state === 'quota_exhausted') {
         continue
@@ -1423,6 +1410,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
 
     let worktreeCloseable = false
     let worktreeReason = 'worker has no exact worktree identity'
+    let worktreeSha: string | null = null
     if (shown.result.worker.worktree_id) {
       const status = await client.call<GitStatusResult>('git.status', {
         worktree: `id:${shown.result.worker.worktree_id}`
@@ -1430,6 +1418,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       const closure = evaluateWorktreeClosure(status.result)
       worktreeCloseable = closure.closeable
       worktreeReason = closure.reason
+      worktreeSha = status.result.head ?? null
     }
 
     const payload = buildAcceptancePayload({
@@ -1439,12 +1428,18 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       accountId: shown.result.worker.startOptions?.managedAccount?.id,
       accountLabel: shown.result.worker.startOptions?.managedAccount?.label,
       worktreeCloseable,
-      worktreeReason
+      worktreeReason,
+      worktreeSha
     })
-    // Why: the receipt write and the release are two mutations. Deriving two ids from one
-    // --retry-request keeps a rerun after a mid-flight crash from double-writing the acceptance
-    // receipt (the executor rejects one id reused across different methods).
-    const retryRequest = getOptionalStringFlag(flags, 'retry-request')
+    // Why: the receipt write and the release are two independent mutations, each auto-assigned a
+    // fresh mutation id by the client on first call. Recovery therefore takes the exact reported
+    // id back through its own flag — never a derived id, which could not match the original
+    // ledger receipt and could collide with another command's id namespace.
+    const retrySendRequest = getOptionalStringFlag(flags, 'retry-send-request')
+    const retryReleaseRequest =
+      getOptionalStringFlag(flags, 'retry-release-request') ??
+      // Legacy alias: --retry-request predates the two-phase flags and always meant the release.
+      getOptionalStringFlag(flags, 'retry-request')
     const acceptance = await client.call<OrchestrationSendResult>(
       'orchestration.send',
       {
@@ -1459,21 +1454,22 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         priority: 'normal',
         payload
       },
-      retryRequest ? { orchestrationRequestId: `${retryRequest}:acceptance-send` } : undefined
+      retrySendRequest ? { orchestrationRequestId: retrySendRequest } : undefined
     )
     const release = await client.call<WorkerReleaseReceipt>(
       'orchestration.workerRelease',
       { dispatch: dispatchId },
-      retryRequest ? { orchestrationRequestId: `${retryRequest}:release` } : undefined
+      retryReleaseRequest ? { orchestrationRequestId: retryReleaseRequest } : undefined
     )
-    if (release.result.state === 'release_unknown') {
+    // Why: only a settled release means the terminal is provably gone. `release_pending` keeps a
+    // recovery obligation, so reporting it as accepted/exit 0 would false-green the closure loop.
+    if (!isSettledRelease(release.result.state)) {
       process.exitCode = 1
     }
     const result = {
-      state:
-        release.result.state === 'release_unknown'
-          ? 'acceptance_recorded_release_unknown'
-          : 'accepted',
+      state: isSettledRelease(release.result.state)
+        ? 'accepted'
+        : `acceptance_recorded_release_${release.result.state === 'release_unknown' ? 'unknown' : 'pending'}`,
       dispatchId,
       taskId: shown.result.dispatch.task_id,
       evidence,
@@ -1483,6 +1479,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         id: shown.result.worker.worktree_id ?? null,
         closeable: worktreeCloseable,
         reason: worktreeReason,
+        sha: worktreeSha,
         removed: false
       }
     }

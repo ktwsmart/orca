@@ -124,11 +124,21 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
     path: ['orchestration', 'worker-accept'],
     summary: 'Write a durable coordinator acceptance receipt and release a settled worker terminal',
     usage:
-      'orca orchestration worker-accept --dispatch <dispatch_id> --evidence <text> [--from <handle>] [--retry-request <id>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'dispatch', 'evidence', 'from', 'retry-request'],
+      'orca orchestration worker-accept --dispatch <dispatch_id> --evidence <text> [--from <handle>] [--retry-send-request <id>] [--retry-release-request <id>] [--json]',
+    allowedFlags: [
+      ...GLOBAL_FLAGS,
+      'dispatch',
+      'evidence',
+      'from',
+      'retry-request',
+      'retry-send-request',
+      'retry-release-request'
+    ],
     notes: [
       'Requires a succeeded worker_done settlement. Acceptance is a separate durable coordinator decision.',
-      'Checks the exact worktree through git.status. Dirty, unknown, or truncated status is retained as not closeable.',
+      'Checks the exact worktree through git.status. Dirty, in-progress-operation, truncated, or unpushed status is retained as not closeable; the acceptance receipt records the worktree HEAD SHA.',
+      'Two independent mutations: pass the exact reported id back through --retry-send-request (acceptance receipt) or --retry-release-request (terminal release). --retry-request stays a legacy alias for the release id.',
+      'Only released/already_released report accepted with exit 0; release_pending and release_unknown exit 1 with the recovery obligation preserved.',
       'Archives and releases only the exact worker terminal after the receipt is written. The worktree is never deleted.'
     ]
   },
