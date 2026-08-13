@@ -221,3 +221,13 @@ export function evaluateWorktreeClosure(status: GitStatusResult): {
 export function boundedPollDelayMs(pollMs: number, deadline: number, now: number): number {
   return Math.max(0, Math.min(pollMs, deadline - now))
 }
+
+// Why: recovery commands are pasted into a real shell. Double quotes let POSIX shells expand $,
+// backticks, and backslashes, silently changing the replayed payload; single-quote escaping is the
+// only quoting an interactive shell round-trips byte-identically.
+export function posixShellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./#-]+$/.test(value)) {
+    return value
+  }
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}

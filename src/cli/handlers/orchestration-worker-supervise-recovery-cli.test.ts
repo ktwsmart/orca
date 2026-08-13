@@ -8,7 +8,7 @@ vi.mock('../selectors', () => ({ getTerminalHandle: vi.fn() }))
 
 import { ORCHESTRATION_HANDLERS } from './orchestration'
 import { printResult } from '../format'
-import { RuntimeClientError } from '../runtime-client'
+import { RuntimeClientError, RuntimeRpcFailureError } from '../runtime-client'
 import {
   ORCHESTRATION_WORKER_LAUNCH_PREFERENCES_RUNTIME_CAPABILITY,
   ORCHESTRATION_WORKER_MANAGED_ACCOUNT_RUNTIME_CAPABILITY
@@ -125,11 +125,16 @@ describe('orchestration worker-supervise recovery contract', () => {
         return Promise.resolve({ result: { accounts: [], activeAccountId: 'account-3' } })
       }
       if (method === 'orchestration.workerStart') {
+        // production server verdict 子型別：即使 code 撞名 transport 碼也不得重放。
         return Promise.reject(
-          new RuntimeClientError(
-            'request_mismatch',
-            'Mutation request recover-1 was already used with different input.'
-          )
+          new RuntimeRpcFailureError({
+            id: 'rpc-1',
+            ok: false,
+            error: {
+              code: 'request_mismatch',
+              message: 'Mutation request recover-1 was already used with different input.'
+            }
+          })
         )
       }
       throw new Error(`Unexpected method ${method}`)
@@ -215,7 +220,7 @@ describe('orchestration worker-supervise recovery contract', () => {
     } as never)
 
     // recovery 指令必須從失敗的帳號開始、且帶前一輪的 dispatch 血緣，重放才是同 payload。
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('--accounts \\"#2\\"'))
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('--accounts #2'))
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringContaining('--retry-start-retry-of dispatch-3')
     )
@@ -282,11 +287,13 @@ describe('orchestration worker-supervise recovery contract', () => {
       ['task', 'task-1'],
       ['accounts', '#3,#2'],
       ['worktree', 'current'],
-      ['name', 'release audit worker'],
+      // 刁鑽值：$、雙引號、單引號、反斜線——shell 貼上不得被展開或破壞。
+      ['name', `echo "$HOME" isn't \\ safe`],
       ['model', 'gpt-5.3-codex'],
       ['effort', 'high'],
       ['timeout-ms', '90000'],
       ['run', 'run-1'],
+      ['environment', 'staging-runtime'],
       ['from', 'term-coordinator']
     ])
     callMock.mockImplementation(makeMock())
@@ -297,28 +304,37 @@ describe('orchestration worker-supervise recovery contract', () => {
       json: true
     } as never)
 
-    // 從輸出撈 recoveryCommand 與原第二次 workerStart 呼叫。
+    // 從輸出撈結構化 recoveryArgs 與原第二次 workerStart 呼叫。
     const output = logSpy.mock.calls
       .map((c) => String(c[0]))
-      .find((t) => t.includes('recoveryCommand'))
+      .find((t) => t.includes('recoveryArgs'))
     expect(output).toBeDefined()
-    const { recoveryCommand } = (JSON.parse(output!) as { result: { recoveryCommand: string } })
-      .result
+    const { recoveryArgs, recoveryCommand } = (
+      JSON.parse(output!) as { result: { recoveryArgs: string[]; recoveryCommand: string } }
+    ).result
     const originalStarts = callMock.mock.calls.filter(
       ([method]) => method === 'orchestration.workerStart'
     )
     const lostCall = originalStarts[1]
 
-    // 解析 recoveryCommand 為旗標（尊重 JSON 引號）。
+    // 結構化 argv → 旗標（零 shell 介入、位元組一致）。
     const parsedFlags = new Map<string, string | boolean>()
-    const matcher = /--([a-z-]+)(?: (?:"((?:[^"\\]|\\.)*)"|(\S+)))?/g
-    for (const match of recoveryCommand.matchAll(matcher)) {
-      const [, flag, quoted, bare] = match
+    for (let i = 2; i < recoveryArgs.length; i += 1) {
+      const token = recoveryArgs[i]!
+      if (!token.startsWith('--')) {
+        continue
+      }
+      const flag = token.slice(2)
       if (flag === 'json') {
         continue
       }
-      parsedFlags.set(flag!, quoted !== undefined ? JSON.parse(`"${quoted}"`) : bare!)
+      parsedFlags.set(flag, recoveryArgs[i + 1]!)
+      i += 1
     }
+    // runtime 身分必須保留在 recovery 中。
+    expect(parsedFlags.get('environment')).toBe('staging-runtime')
+    // 人讀指令對刁鑽值必須用單引號包裹，避免 shell 展開（含 $、雙引號、單引號、反斜線）。
+    expect(recoveryCommand).toContain(`'echo "$HOME" isn'\\''t \\ safe'`)
 
     // 以 recovery 旗標重跑（模擬使用者照指令執行）。
     callMock.mockClear()
@@ -369,6 +385,56 @@ describe('orchestration worker-supervise recovery contract', () => {
     // 深度比對：params 與 mutation id 必須與遺失的原呼叫完全一致。
     expect(replayStart?.[1]).toEqual(lostCall?.[1])
     expect(replayStart?.[2]).toEqual(lostCall?.[2])
+    logSpy.mockRestore()
+  })
+
+  it('pairing-code 會話拒絕組出 durable recovery 指令（不落 secret）', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    callMock.mockImplementation((method: string, params: { accountId?: string }) => {
+      if (method === 'status.get') {
+        return Promise.resolve({
+          result: { capabilities: [ORCHESTRATION_WORKER_MANAGED_ACCOUNT_RUNTIME_CAPABILITY] }
+        })
+      }
+      if (method === 'accounts.list') {
+        return Promise.resolve({
+          result: {
+            codex: {
+              accounts: [
+                { id: 'account-3', email: 'three@example.com', workspaceLabel: 'Codex #3' }
+              ],
+              activeAccountId: 'account-3'
+            }
+          }
+        })
+      }
+      if (method === 'accounts.selectCodex') {
+        return Promise.resolve({ result: { accounts: [], activeAccountId: params.accountId } })
+      }
+      if (method === 'orchestration.workerStart') {
+        return Promise.reject(new RuntimeClientError('runtime_timeout', 'timed out'))
+      }
+      throw new Error(`Unexpected method ${method}`)
+    })
+
+    await ORCHESTRATION_HANDLERS['orchestration worker-supervise']({
+      flags: new Map([
+        ['task', 'task-1'],
+        ['accounts', '#3'],
+        ['pairing-code', 'secret-pairing-token'],
+        ['from', 'term-coordinator']
+      ]),
+      client: { call: callMock },
+      cwd: '/tmp/repo',
+      json: true
+    } as never)
+
+    const all = logSpy.mock.calls.map((c) => String(c[0])).join('\n')
+    expect(all).toContain('start_outcome_unknown')
+    // secret 絕不落 durable 輸出；也不給會連錯 runtime 的指令。
+    expect(all).not.toContain('secret-pairing-token')
+    expect(all).not.toContain('recoveryCommand')
+    expect(process.exitCode).toBe(1)
     logSpy.mockRestore()
   })
 })

@@ -8,7 +8,7 @@ import {
   getOptionalStringFlag,
   getRequiredStringFlag
 } from '../flags'
-import { RuntimeClientError } from '../runtime-client'
+import { RuntimeClientError, RuntimeRpcFailureError } from '../runtime-client'
 import { requireWorkerDoneSettlement } from './orchestration-worker-settlement'
 import { getTerminalHandle } from '../selectors'
 import {
@@ -40,6 +40,7 @@ import {
   type OrchestrationCheckOutput
 } from '../../shared/orchestration-check-output'
 import {
+  posixShellQuote,
   buildAcceptancePayload,
   evaluateWorktreeClosure,
   isCodexQuotaExhaustedText,
@@ -1136,17 +1137,12 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
           { orchestrationRequestId: startRequestId }
         )
       } catch (error) {
-        // Why: RuntimeClientError carries both kinds of failure. Codes minted by the transport
-        // layer (timeout, unavailable, garbled response) mean the outcome is unknown and the
-        // byte-identical replay is safe; every other code is a definite server verdict
-        // (request_mismatch, invalid_argument, ledger guidance, …) that must not be replayed
-        // blindly.
-        const OUTCOME_UNKNOWN_CODES = [
-          'runtime_timeout',
-          'runtime_unavailable',
-          'invalid_runtime_response'
-        ]
-        if (error instanceof RuntimeClientError && !OUTCOME_UNKNOWN_CODES.includes(error.code)) {
+        // Why: classification follows the error's PROVENANCE, not its code. RuntimeRpcFailureError
+        // wraps a structured server response — the server definitely answered, whatever the code
+        // says — so it must never be replayed blindly. Any other failure (transport-minted
+        // RuntimeClientError, socket errors, …) means the outcome is unknown and the
+        // byte-identical replay is safe.
+        if (error instanceof RuntimeRpcFailureError) {
           attempt.state = 'start_failed'
           attempt.reason = `${error.code}: ${error.message}`
           process.exitCode = 1
@@ -1163,9 +1159,20 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         attempt.reason = error instanceof Error ? error.message : String(error)
         process.exitCode = 1
         const remainingSelectors = selectors.slice(accountIndex).join(',')
+        // Why: a paired remote session cannot be reconstructed from durable output without leaking
+        // the pairing secret, and a recovery that silently reconnects to the default local runtime
+        // would replay against the wrong ledger. Refuse to compose a command instead.
+        if (getOptionalStringFlag(flags, 'pairing-code')) {
+          printLocalResult(
+            { state: 'start_outcome_unknown', attempts },
+            json,
+            `The start for account ${account.id} did not return a receipt. This session used --pairing-code, which cannot be written into a durable recovery command; rerun the identical worker-supervise yourself (same pairing, same flags) adding --retry-start-request ${startRequestId}${retryOf ? ` --retry-start-retry-of ${retryOf}` : ''} and --accounts "${remainingSelectors}".`
+          )
+          return
+        }
         // Why: the ledger hashes method + full params, so the replay must round-trip every
-        // originally-provided flag (plus the resolved coordinator handle) — dropping any of them
-        // would change the payload and turn the replay into a request_mismatch.
+        // originally-provided flag (plus the resolved coordinator handle and runtime identity) —
+        // dropping any of them would change the payload or the target ledger.
         const passthroughFlags = [
           'worktree',
           'name',
@@ -1179,20 +1186,27 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
           'timeout-ms',
           'wait-timeout-ms',
           'poll-ms',
-          'run'
+          'run',
+          'environment'
         ]
-        const passthrough = passthroughFlags
-          .map((flag) => {
-            const value = getOptionalStringFlag(flags, flag)
-            return value === undefined ? '' : ` --${flag} ${JSON.stringify(value)}`
-          })
-          .join('')
-        const lineage = retryOf ? ` --retry-start-retry-of ${retryOf}` : ''
-        const recoveryCommand = `orca orchestration worker-supervise --task ${JSON.stringify(task)} --accounts "${remainingSelectors}"${passthrough} --from ${from} --retry-start-request ${startRequestId}${lineage} --json`
+        const recoveryArgs = ['orchestration', 'worker-supervise', '--task', task]
+        recoveryArgs.push('--accounts', remainingSelectors)
+        for (const flag of passthroughFlags) {
+          const value = getOptionalStringFlag(flags, flag)
+          if (value !== undefined) {
+            recoveryArgs.push(`--${flag}`, value)
+          }
+        }
+        recoveryArgs.push('--from', from, '--retry-start-request', startRequestId)
+        if (retryOf) {
+          recoveryArgs.push('--retry-start-retry-of', retryOf)
+        }
+        recoveryArgs.push('--json')
+        const recoveryCommand = `orca ${recoveryArgs.map(posixShellQuote).join(' ')}`
         printLocalResult(
-          { state: 'start_outcome_unknown', recoveryCommand, attempts },
+          { state: 'start_outcome_unknown', recoveryCommand, recoveryArgs, attempts },
           json,
-          `The start for account ${account.id} did not return a receipt. Recover the exact same start (same account, lineage, and request id — no second Dispatch) with:\n${recoveryCommand}`
+          `The start for account ${account.id} did not return a receipt. Recover the exact same start (same account, lineage, request id, and runtime — no second Dispatch) with:\n${recoveryCommand}`
         )
         return
       }

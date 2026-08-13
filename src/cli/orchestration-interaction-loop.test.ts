@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   boundedPollDelayMs,
+  posixShellQuote,
   buildAcceptancePayload,
   evaluateWorktreeClosure,
   isCodexQuotaExhaustedRead,
@@ -209,5 +210,15 @@ describe('Orca 完整互動循環', () => {
     expect(boundedPollDelayMs(2000, 6_500, 5_000)).toBe(1500)
     expect(boundedPollDelayMs(2000, 5_000, 5_000)).toBe(0)
     expect(boundedPollDelayMs(2000, 4_000, 5_000)).toBe(0)
+  })
+
+  it('posixShellQuote：安全字元直通，其餘單引號包裹且不被 shell 展開', () => {
+    expect(posixShellQuote('gpt-5.3-codex')).toBe('gpt-5.3-codex')
+    expect(posixShellQuote('#3,#2')).toBe('#3,#2')
+    expect(posixShellQuote('$HOME')).toBe("'$HOME'")
+    expect(posixShellQuote('echo "$HOME"')).toBe('\'echo "$HOME"\'')
+    expect(posixShellQuote("isn't")).toBe("'isn'\\''t'")
+    expect(posixShellQuote('back\\slash')).toBe("'back\\slash'")
+    expect(posixShellQuote('multi\nline')).toBe("'multi\nline'")
   })
 })
