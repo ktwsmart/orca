@@ -223,23 +223,31 @@ describe('Orca 完整互動循環', () => {
     expect(posixShellQuote('multi\nline')).toBe("'multi\nline'")
   })
 
-  it('posixShellQuote 經真實 /bin/sh round-trip 後位元組一致', async () => {
-    const { execFileSync } = await import('node:child_process')
-    const samples = [
-      '#3,#2',
-      '$HOME',
-      'echo "$HOME"',
-      "isn't",
-      'back\\slash',
-      'multi\nline',
-      'a b  c',
-      '`whoami`'
-    ]
-    for (const sample of samples) {
-      const output = execFileSync('/bin/sh', ['-c', `printf '%s' ${posixShellQuote(sample)}`], {
-        encoding: 'utf8'
-      })
-      expect(output).toBe(sample)
+  // Windows 無 /bin/sh；比照專案慣例跳過（quoting 目標本就是 POSIX shell）。
+  it.skipIf(process.platform === 'win32')(
+    'posixShellQuote 經真實 /bin/sh round-trip 後位元組一致',
+    async () => {
+      const { execFileSync } = await import('node:child_process')
+      const { existsSync } = await import('node:fs')
+      if (!existsSync('/bin/sh')) {
+        return
+      }
+      const samples = [
+        '#3,#2',
+        '$HOME',
+        'echo "$HOME"',
+        "isn't",
+        'back\\slash',
+        'multi\nline',
+        'a b  c',
+        '`whoami`'
+      ]
+      for (const sample of samples) {
+        const output = execFileSync('/bin/sh', ['-c', `printf '%s' ${posixShellQuote(sample)}`], {
+          encoding: 'utf8'
+        })
+        expect(output).toBe(sample)
+      }
     }
-  })
+  )
 })
