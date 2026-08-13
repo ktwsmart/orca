@@ -39,6 +39,39 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
     ]
   },
   {
+    path: ['orchestration', 'worker-supervise'],
+    summary: 'Run a Codex worker with ordered account failover until completion or attention',
+    usage:
+      'orca orchestration worker-supervise --task <task_id> [--accounts <id|email|label|#number,...>] [worker-start flags] [--wait-timeout-ms <n>] [--poll-ms <n>] [--json]',
+    allowedFlags: [
+      ...GLOBAL_FLAGS,
+      'task',
+      'accounts',
+      'on',
+      'worktree',
+      'name',
+      'repo',
+      'base-branch',
+      'display-name',
+      'comment',
+      'setup',
+      'model',
+      'effort',
+      'timeout-ms',
+      'wait-timeout-ms',
+      'poll-ms',
+      'run',
+      'from'
+    ],
+    notes: [
+      'Uses Codex managed accounts only. Without --accounts, unique numbered labels are tried from highest to lowest (#3, #2, #1).',
+      'Managed account selection is local to one Orca runtime, so --on is rejected. Run this command on the worker server instead.',
+      'A provider-authored usage-limit message fences and releases that exact attempt, then creates a new Dispatch linked by retryOf under the next account.',
+      'Questions and escalations stop the loop for coordinator attention. worker_done returns awaiting_acceptance; it does not auto-accept the result.',
+      'Every attempt records its account and Dispatch. No credentials are copied and no worktree is deleted.'
+    ]
+  },
+  {
     path: ['orchestration', 'worker-show'],
     summary: 'Inspect one supervised worker Dispatch',
     usage: 'orca orchestration worker-show --dispatch <dispatch_id> [--json]',
@@ -85,6 +118,18 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
       'An inspectable output archive is preserved before the terminal closes, so worker-read still returns output afterwards.',
       'Never closes setup terminals, configured tabs, reused or pre-existing terminals, user-taken-over terminals, or unproven identities.',
       'Idempotent: repeating the call reports already_released. Only release_unknown exits 1; retained, release_pending, and already_released exit 0.'
+    ]
+  },
+  {
+    path: ['orchestration', 'worker-accept'],
+    summary: 'Write a durable coordinator acceptance receipt and release a settled worker terminal',
+    usage:
+      'orca orchestration worker-accept --dispatch <dispatch_id> --evidence <text> [--from <handle>] [--retry-request <id>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'dispatch', 'evidence', 'from', 'retry-request'],
+    notes: [
+      'Requires a succeeded worker_done settlement. Acceptance is a separate durable coordinator decision.',
+      'Checks the exact worktree through git.status. Dirty, unknown, or truncated status is retained as not closeable.',
+      'Archives and releases only the exact worker terminal after the receipt is written. The worktree is never deleted.'
     ]
   },
   {

@@ -22,6 +22,8 @@ import type {
 } from '../../shared/orchestration-worker-output'
 import type { NativeChatMessage } from '../../shared/native-chat-types'
 import type { RuntimeStatus, RuntimeTerminalRead } from '../../shared/runtime-types'
+import type { CodexRateLimitAccountsState } from '../../shared/types'
+import type { GitStatusResult } from '../../shared/git-status-types'
 import { ORCHESTRATION_WORKER_LAUNCH_PREFERENCES_RUNTIME_CAPABILITY } from '../../shared/protocol-version'
 import { orchestrationMigrationData } from '../../shared/orchestration-rpc-contract'
 import { ORCHESTRATION_RUN_PAGE_LIMIT } from '../../shared/orchestration-run-pagination'
@@ -30,8 +32,18 @@ import {
   formatOrchestrationCheckText,
   prepareOrchestrationCheckOutput,
   type LegacyCompatibilityResult,
-  type OrchestrationMessageSummary as MessageSummary
+  type OrchestrationMessageSummary as MessageSummary,
+  type OrchestrationCheckOutput
 } from '../../shared/orchestration-check-output'
+import {
+  buildAcceptancePayload,
+  evaluateWorktreeClosure,
+  isCodexQuotaExhaustedText,
+  isCodexQuotaExhaustedRead,
+  lifecycleMessageForDispatch,
+  parseAccountOrder,
+  resolveCodexAccount
+} from '../orchestration-interaction-loop'
 
 // Why: 15 s is well under Claude Code's ~2 min Bash-tool silence budget while keeping log volume low. See design doc §3.4.
 const DEFAULT_KEEPALIVE_INTERVAL_MS = 15_000
@@ -441,6 +453,45 @@ type WorkerReleaseReceipt = {
   archive: { source: string | null; status: string | null } | null
   recovery?: string
   lastError?: string
+}
+
+type WorkerShowReceipt = {
+  dispatch: {
+    id: string
+    task_id: string
+    run_id: string
+    status: string
+  }
+  worker: {
+    state: string
+    stage: string
+    agent_terminal_handle: string | null
+    worktree_id?: string | null
+    startOptions?: {
+      managedAccount?: {
+        provider: 'codex'
+        id: string
+        label?: string
+      } | null
+    }
+  }
+}
+
+type WorkerStartReceipt = {
+  runId: string
+  taskId: string
+  dispatchId: string
+  state: string
+  failedStage?: string
+  lastError?: string
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function printLocalResult(value: unknown, json: boolean, text: string): void {
+  console.log(json ? JSON.stringify({ ok: true, result: value }, null, 2) : text)
 }
 
 function formatWorkerRelease(value: WorkerReleaseReceipt): string {
@@ -908,6 +959,237 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     })
   },
 
+  'orchestration worker-supervise': async ({ flags, client, cwd, json }) => {
+    const from = await resolveCoordinatorTerminalHandle(flags, cwd, client)
+    const task = getRequiredStringFlag(flags, 'task')
+    if (getOptionalStringFlag(flags, 'on')) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        'worker-supervise selects a managed account on the local Orca runtime and cannot use --on. Run it on the worker server instead.'
+      )
+    }
+    const accountsSnapshot = await client.call<{ codex: CodexRateLimitAccountsState }>(
+      'accounts.list',
+      { refreshUsage: false }
+    )
+    let selectors: string[]
+    try {
+      selectors = parseAccountOrder(
+        getOptionalStringFlag(flags, 'accounts'),
+        accountsSnapshot.result.codex.accounts
+      )
+    } catch (error) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        error instanceof Error ? error.message : String(error)
+      )
+    }
+    const accounts = selectors.map((selector) => {
+      try {
+        return resolveCodexAccount(accountsSnapshot.result.codex.accounts, selector)
+      } catch (error) {
+        throw new RuntimeClientError(
+          'invalid_argument',
+          error instanceof Error ? error.message : String(error)
+        )
+      }
+    })
+    if (new Set(accounts.map((account) => account.id)).size !== accounts.length) {
+      throw new RuntimeClientError('invalid_argument', '--accounts resolves to duplicate accounts.')
+    }
+
+    const pollMs = getOptionalPositiveIntegerValueFlag(flags, 'poll-ms') ?? 2_000
+    const waitTimeoutMs =
+      getOptionalPositiveIntegerValueFlag(flags, 'wait-timeout-ms') ?? 6 * 60 * 60 * 1_000
+    const deadline = Date.now() + waitTimeoutMs
+    const attempts: {
+      accountId: string
+      accountLabel: string | null
+      dispatchId: string
+      state: string
+      reason?: string
+    }[] = []
+    let retryOf: string | undefined
+
+    for (const account of accounts) {
+      if (Date.now() >= deadline) {
+        process.exitCode = 1
+        printLocalResult(
+          { state: 'timed_out_between_attempts', attempts },
+          json,
+          'Supervision timed out after releasing the previous attempt; no additional account was selected and no new worker was started.'
+        )
+        return
+      }
+      const selected = await client.call<CodexRateLimitAccountsState>('accounts.selectCodex', {
+        accountId: account.id
+      })
+      const activeAccountId =
+        selected.result.activeAccountIdsByRuntime?.host ?? selected.result.activeAccountId
+      if (activeAccountId !== account.id) {
+        throw new RuntimeClientError(
+          'operation_unknown',
+          `Orca did not confirm Codex account ${account.id} as active; no worker was started.`
+        )
+      }
+      const started = await client.call<WorkerStartReceipt>('orchestration.workerStart', {
+        task,
+        on: getOptionalStringFlag(flags, 'on'),
+        worktree: getOptionalStringFlag(flags, 'worktree'),
+        name: getOptionalStringFlag(flags, 'name'),
+        repo: getOptionalStringFlag(flags, 'repo'),
+        baseBranch: getOptionalStringFlag(flags, 'base-branch'),
+        displayName: getOptionalStringFlag(flags, 'display-name'),
+        comment: getOptionalStringFlag(flags, 'comment'),
+        setup: getOptionalStringFlag(flags, 'setup'),
+        agent: 'codex',
+        managedAccount: {
+          provider: 'codex',
+          id: account.id,
+          label: account.workspaceLabel ?? account.email
+        },
+        model: getOptionalStringFlag(flags, 'model'),
+        effort: getOptionalStringFlag(flags, 'effort'),
+        retryOf,
+        timeoutMs: getOptionalPositiveIntegerValueFlag(flags, 'timeout-ms'),
+        run: getOptionalStringFlag(flags, 'run'),
+        from,
+        devMode: isDevCliInvocation()
+      })
+      const attempt = {
+        accountId: account.id,
+        accountLabel: account.workspaceLabel ?? null,
+        dispatchId: started.result.dispatchId,
+        state: started.result.state,
+        ...(started.result.lastError ? { reason: started.result.lastError } : {})
+      }
+      attempts.push(attempt)
+      if (started.result.state !== 'ready') {
+        if (started.result.lastError && isCodexQuotaExhaustedText(started.result.lastError)) {
+          attempt.state = 'quota_exhausted'
+          attempt.reason = 'provider_usage_limit'
+          await client.call('orchestration.workerRelease', {
+            dispatch: started.result.dispatchId
+          })
+          retryOf = started.result.dispatchId
+          continue
+        }
+        attempt.state = 'start_failed'
+        process.exitCode = 1
+        printLocalResult(
+          { state: 'start_failed', attempts },
+          json,
+          `Worker ${started.result.dispatchId} failed to start without provider quota evidence; automatic account switching stopped.`
+        )
+        return
+      }
+
+      while (Date.now() < deadline) {
+        const [output, inbox, show] = await Promise.all([
+          client.call<OrchestrationWorkerReadResult>('orchestration.workerRead', {
+            dispatch: started.result.dispatchId,
+            source: 'auto',
+            limit: 100
+          }),
+          client.call<OrchestrationCheckOutput>('orchestration.check', {
+            terminal: from,
+            run: started.result.runId,
+            peek: true,
+            unread: false,
+            types: 'worker_done,escalation,question'
+          }),
+          client.call<WorkerShowReceipt>('orchestration.workerShow', {
+            dispatch: started.result.dispatchId
+          })
+        ])
+        const lifecycle = lifecycleMessageForDispatch(
+          inbox.result.messages,
+          started.result.dispatchId
+        )
+        if (lifecycle) {
+          const payload = lifecycle.payload ? JSON.parse(lifecycle.payload) : {}
+          if (lifecycle.type === 'worker_done' && payload.outcome === 'succeeded') {
+            attempt.state = 'awaiting_acceptance'
+            const result = {
+              state: 'awaiting_acceptance',
+              runId: started.result.runId,
+              taskId: started.result.taskId,
+              dispatchId: started.result.dispatchId,
+              account: {
+                id: account.id,
+                email: account.email,
+                workspaceLabel: account.workspaceLabel ?? null
+              },
+              message: lifecycle,
+              attempts,
+              nextCommand: `orca orchestration worker-accept --dispatch ${started.result.dispatchId} --evidence <review-evidence> --json`
+            }
+            printLocalResult(
+              result,
+              json,
+              `Worker ${started.result.dispatchId} completed with ${account.workspaceLabel ?? account.email}; awaiting coordinator acceptance.\n${result.nextCommand}`
+            )
+            return
+          }
+          attempt.state = lifecycle.type === 'worker_done' ? 'failed' : 'needs_attention'
+          process.exitCode = lifecycle.type === 'worker_done' ? 1 : 2
+          printLocalResult(
+            { state: attempt.state, message: lifecycle, attempts },
+            json,
+            `Worker ${started.result.dispatchId} requires coordinator attention: ${lifecycle.type} ${lifecycle.subject ?? ''}`
+          )
+          return
+        }
+
+        if (isCodexQuotaExhaustedRead(output.result)) {
+          attempt.state = 'quota_exhausted'
+          attempt.reason = 'provider_usage_limit'
+          await client.call('orchestration.workerStop', {
+            dispatch: started.result.dispatchId
+          })
+          await client.call('orchestration.workerRelease', {
+            dispatch: started.result.dispatchId
+          })
+          retryOf = started.result.dispatchId
+          break
+        }
+
+        if (show.result.dispatch.status === 'failed' || show.result.worker.state === 'failed') {
+          attempt.state = 'failed'
+          attempt.reason = 'worker_failed_without_quota_evidence'
+          process.exitCode = 1
+          printLocalResult(
+            { state: 'failed', attempts },
+            json,
+            `Worker ${started.result.dispatchId} failed without provider quota evidence; automatic account switching stopped.`
+          )
+          return
+        }
+        await sleep(pollMs)
+      }
+      if (attempt.state === 'quota_exhausted') {
+        continue
+      }
+      if (Date.now() >= deadline) {
+        attempt.state = 'timed_out'
+        process.exitCode = 1
+        printLocalResult(
+          { state: 'timed_out', attempts },
+          json,
+          `Supervision timed out while waiting for ${started.result.dispatchId}; the worker was retained for inspection.`
+        )
+        return
+      }
+    }
+
+    process.exitCode = 1
+    printLocalResult(
+      { state: 'accounts_exhausted', attempts },
+      json,
+      `All ${accounts.length} configured Codex accounts reported provider quota exhaustion. No unlisted account was used.`
+    )
+  },
+
   'orchestration worker-show': async ({ flags, client, json }) => {
     const result = await client.call<{
       dispatch: { id: string; task_id: string; status: string }
@@ -996,6 +1278,85 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       process.exitCode = 1
     }
     printResult(result, json, formatWorkerRelease)
+  },
+
+  'orchestration worker-accept': async ({ flags, client, cwd, json }) => {
+    const dispatchId = getRequiredStringFlag(flags, 'dispatch')
+    const evidence = getRequiredStringFlag(flags, 'evidence')
+    const from = await resolveCoordinatorTerminalHandle(flags, cwd, client)
+    const shown = await client.call<WorkerShowReceipt>('orchestration.workerShow', {
+      dispatch: dispatchId
+    })
+    if (shown.result.dispatch.status !== 'completed' || shown.result.worker.state !== 'succeeded') {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        `Worker ${dispatchId} is not a succeeded worker_done settlement; current dispatch=${shown.result.dispatch.status}, worker=${shown.result.worker.state}.`
+      )
+    }
+
+    let worktreeCloseable = false
+    let worktreeReason = 'worker has no exact worktree identity'
+    if (shown.result.worker.worktree_id) {
+      const status = await client.call<GitStatusResult>('git.status', {
+        worktree: `id:${shown.result.worker.worktree_id}`
+      })
+      const closure = evaluateWorktreeClosure(status.result)
+      worktreeCloseable = closure.closeable
+      worktreeReason = closure.reason
+    }
+
+    const payload = buildAcceptancePayload({
+      taskId: shown.result.dispatch.task_id,
+      dispatchId,
+      evidence,
+      accountId: shown.result.worker.startOptions?.managedAccount?.id,
+      accountLabel: shown.result.worker.startOptions?.managedAccount?.label,
+      worktreeCloseable,
+      worktreeReason
+    })
+    const acceptance = await client.call<OrchestrationSendResult>('orchestration.send', {
+      from,
+      to: `dispatch:${dispatchId}`,
+      run: shown.result.dispatch.run_id,
+      subject: 'Coordinator accepted worker result',
+      body:
+        `The coordinator accepted and took ownership of the result. ` +
+        `${worktreeCloseable ? 'The clean worktree may be closed by the coordinator.' : `The worktree remains retained: ${worktreeReason}.`}`,
+      type: 'status',
+      priority: 'normal',
+      payload
+    })
+    const release = await callMutation<WorkerReleaseReceipt>(
+      client,
+      flags,
+      'orchestration.workerRelease',
+      { dispatch: dispatchId }
+    )
+    if (release.result.state === 'release_unknown') {
+      process.exitCode = 1
+    }
+    const result = {
+      state:
+        release.result.state === 'release_unknown'
+          ? 'acceptance_recorded_release_unknown'
+          : 'accepted',
+      dispatchId,
+      taskId: shown.result.dispatch.task_id,
+      evidence,
+      acceptance,
+      terminal: release.result,
+      worktree: {
+        id: shown.result.worker.worktree_id ?? null,
+        closeable: worktreeCloseable,
+        reason: worktreeReason,
+        removed: false
+      }
+    }
+    printLocalResult(
+      result,
+      json,
+      `Accepted ${dispatchId}; terminal=${release.result.state}; worktree=${worktreeCloseable ? 'closeable' : 'retained'} (${worktreeReason}).`
+    )
   },
 
   'orchestration worker-retain': async ({ flags, client, json }) => {
