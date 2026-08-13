@@ -61,12 +61,13 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
       'wait-timeout-ms',
       'poll-ms',
       'retry-start-request',
+      'retry-start-retry-of',
       'run',
       'from'
     ],
     notes: [
       'Uses Codex managed accounts only. Without --accounts, unique numbered labels are tried from highest to lowest (#3, #2, #1).',
-      'A lost start reply prints the attempt with its exact startRequestId and exits 1; rerun the identical worker-supervise with --retry-start-request <id> to replay the same start mutation without spawning a second Dispatch.',
+      'A lost start reply prints an exact recovery command (remaining --accounts, --retry-start-request <id>, and --retry-start-retry-of <dispatch> when a lineage exists) that replays the byte-identical start mutation without spawning a second Dispatch. Definite runtime errors are reported as start_failed instead and must not be replayed blindly.',
       'Managed account selection is local to one Orca runtime, so --on is rejected. Run this command on the worker server instead.',
       'A provider-authored usage-limit message fences and releases that exact attempt, then creates a new Dispatch linked by retryOf under the next account.',
       'Questions and escalations stop the loop for coordinator attention. worker_done returns awaiting_acceptance; it does not auto-accept the result.',
@@ -126,21 +127,19 @@ export const ORCHESTRATION_WORKER_COMMAND_SPECS: CommandSpec[] = [
     path: ['orchestration', 'worker-accept'],
     summary: 'Write a durable coordinator acceptance receipt and release a settled worker terminal',
     usage:
-      'orca orchestration worker-accept --dispatch <dispatch_id> --evidence <text> [--from <handle>] [--retry-send-request <id>] [--retry-release-request <id>] [--json]',
+      'orca orchestration worker-accept --dispatch <dispatch_id> --evidence <text> [--from <handle>] [--retry-release-request <id>] [--json]',
     allowedFlags: [
       ...GLOBAL_FLAGS,
       'dispatch',
       'evidence',
       'from',
       'retry-request',
-      'retry-send-request',
       'retry-release-request'
     ],
     notes: [
       'Requires a succeeded worker_done settlement. Acceptance is a separate durable coordinator decision.',
       'Checks the exact worktree through git.status. Dirty, in-progress-operation, truncated, or unpushed status is retained as not closeable; the acceptance receipt records the worktree HEAD SHA.',
-      'Two independent mutations: pass the exact reported id back through --retry-send-request (acceptance receipt) or --retry-release-request (terminal release). --retry-request stays a legacy alias for the release id.',
-      'Release-only recovery (--retry-release-request without --retry-send-request) skips the acceptance send entirely — the receipt already landed durably, and re-sending would duplicate it.',
+      'The acceptance receipt mutation id is derived from the dispatch, so every invocation (first run or crash-recovery rerun) hits the same ledger receipt instead of duplicating it; a rerun with different evidence or changed worktree state fails closed as request_mismatch. Pass the reported release id back through --retry-release-request (--retry-request stays a legacy alias).',
       'Only released/already_released report accepted with exit 0; release_pending and release_unknown exit 1 with the recovery obligation preserved.',
       'Archives and releases only the exact worker terminal after the receipt is written. The worktree is never deleted.'
     ]

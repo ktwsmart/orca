@@ -1,4 +1,5 @@
 import type { OrcaRuntimeService } from '../../orca-runtime'
+import type { OrchestrationDb } from '../../orchestration/db'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { WorkerEffect } from './orchestration-worker-topology'
 
@@ -11,9 +12,18 @@ export function assertManagedAccountRequestSupported(params: {
   managedAccount?: unknown
   terminal?: string
   agent: string | undefined
+  on?: string
 }): void {
   if (!params.managedAccount) {
     return
+  }
+  // Why: the federated path ignores managedAccount entirely, so accepting the claim there would
+  // record an account nothing enforced or attested.
+  if (params.on) {
+    throw new OrchestrationError(
+      'invalid_argument',
+      'managedAccount is not supported on federated worker starts; run worker-supervise on the worker server itself.'
+    )
   }
   // Why: the pane registry is Codex-specific evidence; letting another agent carry a
   // managedAccount claim would vouch for an account nothing can attest to.
@@ -37,6 +47,9 @@ export function assertManagedAccountRequestSupported(params: {
 
 export async function verifyWorkerLaunchAccount(args: {
   runtime: OrcaRuntimeService
+  db: OrchestrationDb
+  dispatchId: string
+  worktreeId: string
   terminalHandle: string
   managedAccountId: string
   effects: WorkerEffect[]
@@ -68,5 +81,15 @@ export async function verifyWorkerLaunchAccount(args: {
       id: args.terminalHandle
     })
   }
+  // Why: the failure receipt reads effects back from the DB, so the cleanup outcome must be
+  // persisted here — otherwise the receipt would still list a terminal that no longer exists
+  // (or hide that a close failed).
+  args.db.recordWorkerStage({
+    dispatchId: args.dispatchId,
+    stage: 'account_verification_cleanup',
+    worktreeId: args.worktreeId,
+    terminalHandle: args.terminalHandle,
+    effects: args.effects
+  })
   throw new Error(verificationError)
 }

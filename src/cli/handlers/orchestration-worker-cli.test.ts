@@ -450,7 +450,52 @@ describe('orchestration worker-start CLI contract', () => {
     logSpy.mockRestore()
   })
 
-  it('兩段 retry 旗標各自原封傳遞，不衍生、不共用', async () => {
+  it('首呼即帶確定性 send id；release 未帶旗標時由 client 自產 id', async () => {
+    callMock.mockImplementation((method: string) => {
+      if (method === 'orchestration.workerShow') {
+        return Promise.resolve({
+          result: {
+            dispatch: { id: 'dispatch-2', task_id: 'task-1', run_id: 'run-1', status: 'completed' },
+            worker: { state: 'succeeded', stage: 'settled', agent_terminal_handle: 'term-worker' }
+          }
+        })
+      }
+      if (method === 'orchestration.send') {
+        return Promise.resolve({ result: { message: { id: 'acceptance-1', run_id: 'run-1' } } })
+      }
+      if (method === 'orchestration.workerRelease') {
+        return Promise.resolve({
+          result: {
+            dispatchId: 'dispatch-2',
+            state: 'released',
+            processAction: 'closed',
+            archive: null
+          }
+        })
+      }
+      throw new Error(`Unexpected method ${method}`)
+    })
+
+    await ORCHESTRATION_HANDLERS['orchestration worker-accept']({
+      flags: new Map([
+        ['dispatch', 'dispatch-2'],
+        ['evidence', 'tests pass'],
+        ['from', 'term-coordinator']
+      ]),
+      client: { call: callMock },
+      cwd: '/tmp/repo',
+      json: true
+    } as never)
+
+    const send = callMock.mock.calls.find(([method]) => method === 'orchestration.send')
+    const release = callMock.mock.calls.find(([method]) => method === 'orchestration.workerRelease')
+    // 確定性 id：任何一次執行（首呼或重跑）都命中同一 ledger receipt，不會重寫回執。
+    expect(send?.[2]).toEqual({ orchestrationRequestId: 'worker-accept-acceptance-dispatch-2' })
+    // 未帶旗標＝首呼；client 對 mutation 自產隨機 id，handler 不傳第三參數。
+    expect(release?.[2]).toBeUndefined()
+  })
+
+  it('release recovery：send 以確定性 id 冪等重放、release 用回報的原 id', async () => {
     callMock.mockImplementation((method: string) => {
       if (method === 'orchestration.workerShow') {
         return Promise.resolve({
@@ -481,7 +526,6 @@ describe('orchestration worker-start CLI contract', () => {
         ['dispatch', 'dispatch-2'],
         ['evidence', 'tests pass'],
         ['from', 'term-coordinator'],
-        ['retry-send-request', 'send-id-1'],
         ['retry-release-request', 'release-id-1']
       ]),
       client: { call: callMock },
@@ -490,55 +534,12 @@ describe('orchestration worker-start CLI contract', () => {
     } as never)
 
     const send = callMock.mock.calls.find(([method]) => method === 'orchestration.send')
-    const release = callMock.mock.calls.find(([method]) => method === 'orchestration.workerRelease')
-    // 精確回傳原 id：能命中原 ledger receipt，不會重寫驗收或撞他命令的 namespace。
-    expect(send?.[2]).toEqual({ orchestrationRequestId: 'send-id-1' })
-    expect(release?.[2]).toEqual({ orchestrationRequestId: 'release-id-1' })
-  })
-
-  it('release-only recovery 跳過 acceptance send，不重寫回執', async () => {
-    callMock.mockImplementation((method: string) => {
-      if (method === 'orchestration.workerShow') {
-        return Promise.resolve({
-          result: {
-            dispatch: { id: 'dispatch-2', task_id: 'task-1', run_id: 'run-1', status: 'completed' },
-            worker: { state: 'succeeded', stage: 'settled', agent_terminal_handle: 'term-worker' }
-          }
-        })
-      }
-      if (method === 'orchestration.workerRelease') {
-        return Promise.resolve({
-          result: {
-            dispatchId: 'dispatch-2',
-            state: 'released',
-            processAction: 'closed',
-            archive: null
-          }
-        })
-      }
-      throw new Error(`Unexpected method ${method}`)
-    })
-
-    await ORCHESTRATION_HANDLERS['orchestration worker-accept']({
-      flags: new Map([
-        ['dispatch', 'dispatch-2'],
-        ['evidence', 'tests pass'],
-        ['from', 'term-coordinator'],
-        ['retry-release-request', 'release-id-1']
-      ]),
-      client: { call: callMock },
-      cwd: '/tmp/repo',
-      json: true
-    } as never)
-
-    expect(callMock.mock.calls.filter(([method]) => method === 'orchestration.send')).toHaveLength(
-      0
-    )
+    expect(send?.[2]).toEqual({ orchestrationRequestId: 'worker-accept-acceptance-dispatch-2' })
     const release = callMock.mock.calls.find(([method]) => method === 'orchestration.workerRelease')
     expect(release?.[2]).toEqual({ orchestrationRequestId: 'release-id-1' })
   })
 
-  it('legacy --retry-request 等同 release id，send 照常首呼', async () => {
+  it('legacy --retry-request 等同 release id；send 照常以確定性 id 執行', async () => {
     callMock.mockImplementation((method: string) => {
       if (method === 'orchestration.workerShow') {
         return Promise.resolve({
@@ -576,10 +577,8 @@ describe('orchestration worker-start CLI contract', () => {
       json: true
     } as never)
 
-    // legacy alias＝release-only recovery 語意：send 跳過、release 用原 id。
-    expect(callMock.mock.calls.filter(([method]) => method === 'orchestration.send')).toHaveLength(
-      0
-    )
+    const send = callMock.mock.calls.find(([method]) => method === 'orchestration.send')
+    expect(send?.[2]).toEqual({ orchestrationRequestId: 'worker-accept-acceptance-dispatch-2' })
     const release = callMock.mock.calls.find(([method]) => method === 'orchestration.workerRelease')
     expect(release?.[2]).toEqual({ orchestrationRequestId: 'legacy-release-id' })
   })

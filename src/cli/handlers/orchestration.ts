@@ -1056,9 +1056,12 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       state: string
       reason?: string
     }[] = []
-    let retryOf: string | undefined
+    // Why: recovery of a lost reply on attempt N must replay the exact original payload — same
+    // account, same retryOf lineage, same mutation id — so the printed recovery command carries
+    // all three and this initializer restores the lineage.
+    let retryOf: string | undefined = getOptionalStringFlag(flags, 'retry-start-retry-of')
 
-    for (const account of accounts) {
+    for (const [accountIndex, account] of accounts.entries()) {
       if (Date.now() >= deadline) {
         process.exitCode = 1
         printLocalResult(
@@ -1133,16 +1136,33 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
           { orchestrationRequestId: startRequestId }
         )
       } catch (error) {
-        // Why: a thrown call means the runtime may or may not have accepted the start. The attempt
-        // (with its exact request id) must survive in the durable output so recovery can replay
-        // the identical mutation instead of guessing.
+        // Why: a RuntimeClientError is a definite server verdict (request_mismatch,
+        // invalid_argument, ledger operation_unknown guidance, …) — the reply was NOT lost, so
+        // blindly resending the same id would loop. Only transport-level failures qualify as a
+        // lost reply worth replaying.
+        if (error instanceof RuntimeClientError) {
+          attempt.state = 'start_failed'
+          attempt.reason = `${error.code}: ${error.message}`
+          process.exitCode = 1
+          printLocalResult(
+            { state: 'start_failed', errorCode: error.code, attempts },
+            json,
+            `The runtime rejected the start for account ${account.id} (${error.code}); follow the error's own guidance instead of replaying the same request id. ${error.message}`
+          )
+          return
+        }
+        // Why: the attempt (with its exact request id, account, and retryOf lineage) must survive
+        // in durable output so recovery can replay the byte-identical mutation.
         attempt.state = 'start_outcome_unknown'
         attempt.reason = error instanceof Error ? error.message : String(error)
         process.exitCode = 1
+        const remainingSelectors = selectors.slice(accountIndex).join(',')
+        const lineage = retryOf ? ` --retry-start-retry-of ${retryOf}` : ''
+        const recoveryCommand = `orca orchestration worker-supervise --task ${task} --accounts "${remainingSelectors}" --retry-start-request ${startRequestId}${lineage} --json`
         printLocalResult(
-          { state: 'start_outcome_unknown', attempts },
+          { state: 'start_outcome_unknown', recoveryCommand, attempts },
           json,
-          `The start for account ${account.id} did not return a receipt. Rerun the same worker-supervise with --retry-start-request ${startRequestId} to recover the exact same start without spawning a second Dispatch.`
+          `The start for account ${account.id} did not return a receipt. Recover the exact same start (same account, lineage, and request id — no second Dispatch) with:\n${recoveryCommand}`
         )
         return
       }
@@ -1456,37 +1476,31 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       worktreeReason,
       worktreeSha
     })
-    // Why: the receipt write and the release are two independent mutations, each auto-assigned a
-    // fresh mutation id by the client on first call. Recovery therefore takes the exact reported
-    // id back through its own flag — never a derived id, which could not match the original
-    // ledger receipt and could collide with another command's id namespace.
-    const retrySendRequest = getOptionalStringFlag(flags, 'retry-send-request')
+    // Why: the acceptance send is idempotent by construction — its mutation id is derived from the
+    // dispatch, so every invocation (first run or crash-recovery rerun) hits the same ledger
+    // receipt instead of writing a duplicate. A rerun with different evidence or a changed
+    // worktree state fails closed as request_mismatch rather than silently rewriting history.
+    const acceptanceSendRequestId = `worker-accept-acceptance-${dispatchId}`
     const retryReleaseRequest =
       getOptionalStringFlag(flags, 'retry-release-request') ??
       // Legacy alias: --retry-request predates the two-phase flags and always meant the release.
       getOptionalStringFlag(flags, 'retry-request')
-    // Why: release-only recovery means the acceptance receipt already landed durably and only the
-    // release outcome is unknown. Re-sending with a fresh id would write a duplicate receipt, so
-    // the send is skipped unless its own retry id says it also needs recovery.
-    const releaseOnlyRecovery = Boolean(retryReleaseRequest) && !retrySendRequest
-    const acceptance = releaseOnlyRecovery
-      ? null
-      : await client.call<OrchestrationSendResult>(
-          'orchestration.send',
-          {
-            from,
-            to: `dispatch:${dispatchId}`,
-            run: shown.result.dispatch.run_id,
-            subject: 'Coordinator accepted worker result',
-            body:
-              `The coordinator accepted and took ownership of the result. ` +
-              `${worktreeCloseable ? 'The clean worktree may be closed by the coordinator.' : `The worktree remains retained: ${worktreeReason}.`}`,
-            type: 'status',
-            priority: 'normal',
-            payload
-          },
-          retrySendRequest ? { orchestrationRequestId: retrySendRequest } : undefined
-        )
+    const acceptance = await client.call<OrchestrationSendResult>(
+      'orchestration.send',
+      {
+        from,
+        to: `dispatch:${dispatchId}`,
+        run: shown.result.dispatch.run_id,
+        subject: 'Coordinator accepted worker result',
+        body:
+          `The coordinator accepted and took ownership of the result. ` +
+          `${worktreeCloseable ? 'The clean worktree may be closed by the coordinator.' : `The worktree remains retained: ${worktreeReason}.`}`,
+        type: 'status',
+        priority: 'normal',
+        payload
+      },
+      { orchestrationRequestId: acceptanceSendRequestId }
+    )
     const release = await client.call<WorkerReleaseReceipt>(
       'orchestration.workerRelease',
       { dispatch: dispatchId },
@@ -1528,7 +1542,9 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       'orchestration.workerRetain',
       { dispatch: getRequiredStringFlag(flags, 'dispatch') }
     )
-    if (result.result.state === 'release_unknown') {
+    // Why: an already-committed close can surface as release_pending here too; both unsettled
+    // states leave a recovery obligation and must not exit 0.
+    if (result.result.state === 'release_unknown' || result.result.state === 'release_pending') {
       process.exitCode = 1
     }
     printResult(result, json, formatWorkerRelease)

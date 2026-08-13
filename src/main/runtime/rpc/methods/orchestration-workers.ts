@@ -47,6 +47,15 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         )
       }
 
+      // Why: the guard must run before the federated branch — a direct RPC with --on would
+      // otherwise bypass it entirely while the federated path silently ignores managedAccount.
+      assertManagedAccountRequestSupported({
+        managedAccount: params.managedAccount,
+        terminal: params.terminal,
+        agent: params.agent,
+        on: params.on
+      })
+
       if (params.on) {
         return startFederatedWorker({
           params,
@@ -62,11 +71,6 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
       const createsWorktree =
         requestedWorktree === 'new-child' || requestedWorktree === 'new-top-level'
       const { agent, launch } = prepareLocalWorkerStart({ params, createsWorktree, runtime })
-      assertManagedAccountRequestSupported({
-        managedAccount: params.managedAccount,
-        terminal: params.terminal,
-        agent
-      })
 
       const coordinatorTerminal = await runtime.showTerminal(params.from)
       const coordinatorWorktree = await runtime.showManagedWorktree(
@@ -223,6 +227,9 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           failedStage = 'account_verification'
           await verifyWorkerLaunchAccount({
             runtime,
+            db,
+            dispatchId: started.dispatch.id,
+            worktreeId: resolvedWorktree.id,
             terminalHandle,
             managedAccountId: params.managedAccount.id,
             effects

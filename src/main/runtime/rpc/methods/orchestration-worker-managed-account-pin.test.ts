@@ -125,6 +125,24 @@ describe('orchestration workerStart managed-account pin', () => {
     expect(result.lastError).toContain('launched under Codex account account-2')
     // 驗證失敗的新建終端不得存活成無主資源。
     expect(runtime.closeTerminal).toHaveBeenCalledWith('term_worker')
+    // 清理結果必須持久化到回執 effects，不能只留在記憶體。
+    const worker = db.getWorkerDispatch(result.dispatchId)
+    const effects = JSON.parse(worker?.effects ?? '[]') as { kind?: string; action?: string }[]
+    expect(effects.some((e) => e.kind === 'terminal' && e.action === 'closed')).toBe(true)
+  })
+
+  it('managedAccount 禁止走 federated（--on）路徑，guard 先於分流', async () => {
+    setup({ known: true, accountId: 'account-3' })
+    const task = db.createTask({ spec: 'federated guard task', runId: activeRunId })
+    await expect(
+      call('orchestration.workerStart', {
+        task: task.id,
+        from: 'term_coord',
+        agent: 'codex',
+        on: 'windows',
+        managedAccount: { provider: 'codex', id: 'account-3', label: 'Codex #3' }
+      })
+    ).rejects.toMatchObject({ code: 'invalid_argument' })
   })
 
   it('managedAccount 禁止搭配非 codex agent', async () => {
