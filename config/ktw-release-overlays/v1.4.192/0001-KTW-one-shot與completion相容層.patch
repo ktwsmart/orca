@@ -661,7 +661,7 @@ index 26145d313d..d605418c7c 100644
  }
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.test.ts b/src/renderer/src/lib/automation-one-shot-startup.test.ts
 new file mode 100644
-index 0000000000..5c491c6fd2
+index 0000000000..5b3c94ce59
 --- /dev/null
 +++ b/src/renderer/src/lib/automation-one-shot-startup.test.ts
 @@ -0,0 +1,121 @@
@@ -774,7 +774,7 @@ index 0000000000..5c491c6fd2
 +    expect(oneShot.shell).toBe('posix')
 +    expect(applyAutomationOneShotCommand(plan, oneShot)).toBe('process-exit')
 +    expect((plan as { launchCommand: string }).launchCommand).toBe(
-+      `sh -c 'cursor-agent --print task; orca_status=$?; exit "$orca_status"'`
++      `exec sh -c 'cursor-agent --print task; orca_status=$?; exit "$orca_status"'`
 +    )
 +  })
 +
@@ -788,10 +788,10 @@ index 0000000000..5c491c6fd2
 +})
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.ts b/src/renderer/src/lib/automation-one-shot-startup.ts
 new file mode 100644
-index 0000000000..baa6f217dd
+index 0000000000..e4968870db
 --- /dev/null
 +++ b/src/renderer/src/lib/automation-one-shot-startup.ts
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,181 @@
 +import { buildAgentStartupPlan, type AgentStartupPlan } from '@/lib/tui-agent-startup'
 +import type { AgentPromptInjectionMode } from '../../../shared/tui-agent-config'
 +import {
@@ -900,7 +900,9 @@ index 0000000000..baa6f217dd
 +    return 'agent-status'
 +  }
 +  const wrappedCommand = `${plan.launchCommand}; orca_status=$?; exit "$orca_status"`
-+  plan.launchCommand = `sh -c ${quoteStartupArg(wrappedCommand, 'posix')}`
++  // Why `exec`: this command is typed into an interactive login shell. Replacing that
++  // shell makes the agent wrapper own the PTY lifetime, so its exit becomes a real PTY exit.
++  plan.launchCommand = `exec sh -c ${quoteStartupArg(wrappedCommand, 'posix')}`
 +  return 'process-exit'
 +}
 +
@@ -972,7 +974,7 @@ index 0000000000..baa6f217dd
 +  }
 +}
 diff --git a/src/renderer/src/lib/launch-agent-background-session.test.ts b/src/renderer/src/lib/launch-agent-background-session.test.ts
-index 42df833288..20b42c2241 100644
+index 42df833288..2cc27fc2a4 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.test.ts
 +++ b/src/renderer/src/lib/launch-agent-background-session.test.ts
 @@ -28,6 +28,7 @@ const mockPasteDraftWhenAgentReady = vi.fn()
@@ -1026,7 +1028,7 @@ index 42df833288..20b42c2241 100644
 +    })
 +
 +    const command = mockSpawn.mock.calls[0]?.[0]?.command as string
-+    expect(command).toMatch(/^sh -c /)
++    expect(command).toMatch(/^exec sh -c /)
 +    expect(command).toContain('agy')
 +    expect(command).toContain('--prompt')
 +    expect(command).toContain('run the audit')
@@ -1046,7 +1048,7 @@ index 42df833288..20b42c2241 100644
 +    })
 +
 +    const command = mockSpawn.mock.calls[0]?.[0]?.command as string
-+    expect(command).toMatch(/^sh -c /)
++    expect(command).toMatch(/^exec sh -c /)
 +    expect(command).toContain('cursor-agent')
 +    expect(command).toContain('--trust')
 +    expect(command).toContain('--model')

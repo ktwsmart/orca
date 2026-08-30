@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
   "name": "KTW Orca v1.4.192 one-shot 與 completion 相容層",
-  "generatedBy": "Codex 2026-08-31 07:13 +0800",
+  "generatedBy": "Codex 2026-08-31 07:30 +0800",
   "officialVersion": "1.4.192",
   "officialBaseSha": "ce4df07736baa38d742613bd68d5a3d845f79d25",
   "patchFile": "0001-KTW-one-shot與completion相容層.patch",
-  "patchSha256": "438742ddb389a020d883eb2c216d69e2a79310d88e52f59da0558ef9bdbdd4cb",
-  "outputTreeSha": "2e4d09c1dc8d92f612527204ca2ef82560fe6c96",
+  "patchSha256": "bd7320b5b6259f0f4da48809b8f25a79eb4b1a02d8e144dcd0200e113c9e9a98",
+  "outputTreeSha": "6077c275a97e19e482569332835d091ab25fd8b4",
   "sourceCommits": [
     "d2d981c424b4c3f10d1cedc7581cd8c8c53d0b03",
     "acf807102762fdc8420cad0080ca341a58d4d618",
