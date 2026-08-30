@@ -55,9 +55,6 @@ export function planAutomationOneShotStartup(args: {
   }
 
   const shell = resolveLoginShellStartupDialect(getClientLoginShell())
-  if (args.agent === 'antigravity') {
-    return { enabled: true, agentArgs: args.agentArgs, shell, promptInjectionMode: 'flag-prompt' }
-  }
   const tokenized = tokenizeStartupCommand(args.agentArgs, shell)
   if (!tokenized.ok || tokenized.tokens.includes('--')) {
     return {
@@ -66,6 +63,17 @@ export function planAutomationOneShotStartup(args: {
       shell: fallbackShell,
       promptInjectionMode: undefined
     }
+  }
+  if (args.agent === 'antigravity') {
+    if (tokenized.tokens.some((token) => token === '-i' || token === '--prompt-interactive')) {
+      return {
+        enabled: false,
+        agentArgs: args.agentArgs,
+        shell: fallbackShell,
+        promptInjectionMode: undefined
+      }
+    }
+    return { enabled: true, agentArgs: args.agentArgs, shell, promptInjectionMode: 'flag-prompt' }
   }
   const hasPrint = isPrintModeHeadlessOneShotCommand(['cursor-agent', ...tokenized.tokens])
   const agentArgs = hasPrint ? args.agentArgs : `${args.agentArgs.trim()} --print`.trim()

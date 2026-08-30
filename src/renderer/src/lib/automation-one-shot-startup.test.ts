@@ -47,6 +47,20 @@ describe('automation one-shot startup', () => {
       enabled: true,
       promptInjectionMode: 'flag-prompt'
     })
+    expect(
+      planAutomationOneShotStartup({
+        ...base,
+        agent: 'antigravity',
+        agentArgs: '-- --model x'
+      }).enabled
+    ).toBe(false)
+    expect(
+      planAutomationOneShotStartup({
+        ...base,
+        agent: 'antigravity',
+        agentArgs: '--prompt-interactive'
+      }).enabled
+    ).toBe(false)
   })
 
   it.each([
