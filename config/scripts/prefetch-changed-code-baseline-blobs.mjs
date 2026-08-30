@@ -1,8 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
+import { collectTouchedSourcePaths } from './check-changed-code-quality.mjs'
 
-const SOURCE_FILE_PATTERN = /\.(?:[cm]?[jt]sx?)$/
 const OBJECT_ID_PATTERN = /^[0-9a-f]{40,64}$/
 const FETCH_CHUNK_SIZE = 64
 
@@ -15,17 +15,11 @@ function runGit(root, args, options = {}) {
   })
 }
 
-function splitNullDelimited(output) {
-  return output.split('\0').filter(Boolean)
-}
-
 export function collectChangedSourceBlobOids(root, baseline, git = runGit) {
   if (!OBJECT_ID_PATTERN.test(baseline)) {
     throw new Error(`Invalid baseline object id: ${baseline}`)
   }
-  const files = splitNullDelimited(
-    git(root, ['diff', '--name-only', '-z', '--diff-filter=ACMRTUB', baseline, 'HEAD', '--'])
-  ).filter((file) => SOURCE_FILE_PATTERN.test(file))
+  const files = collectTouchedSourcePaths(root, baseline, git)
   const blobOids = new Set()
   for (const file of files) {
     const entry = git(root, ['ls-tree', '-z', baseline, '--', file])

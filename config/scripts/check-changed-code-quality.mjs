@@ -5,7 +5,7 @@ import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 import { resolvePullRequestDiffBase } from './git-pull-request-diff-base.mjs'
 
-const SOURCE_FILE_PATTERN = /\.(?:[cm]?[jt]sx?)$/
+export const SOURCE_FILE_PATTERN = /\.(?:[cm]?[jt]sx?)$/
 export const OXLINT_SCANS = [
   {
     // Why: no --config, so Oxlint keeps discovering nested configs. Pinning the root
@@ -54,6 +54,12 @@ function runGit(root, args, options = {}) {
 
 function splitNullDelimited(output) {
   return output.split('\0').filter(Boolean)
+}
+
+export function collectTouchedSourcePaths(root, comparisonBase, git = runGit) {
+  return splitNullDelimited(
+    git(root, ['diff', '--name-only', '-z', '--no-renames', comparisonBase, 'HEAD', '--'])
+  ).filter((file) => SOURCE_FILE_PATTERN.test(file))
 }
 
 function resolveBase(root, requestedBase) {
@@ -153,11 +159,7 @@ export function collectBaseLineBlocks(root, comparisonBase, files = null) {
   // Why: in a split, the moved code's base text lives in the ORIGINAL file, which is
   // often deleted or renamed away. Deleted paths never reach the changed-file list
   // (it filters to ACMRTUB), so read every path the diff touches, deletions included.
-  const paths =
-    files ??
-    splitNullDelimited(runGit(root, ['diff', '--name-only', '-z', comparisonBase, '--'])).filter(
-      (file) => SOURCE_FILE_PATTERN.test(file)
-    )
+  const paths = files ?? collectTouchedSourcePaths(root, comparisonBase)
   const blocks = []
   for (const file of paths) {
     const result = spawnSync('git', ['show', `${comparisonBase}:${file}`], {

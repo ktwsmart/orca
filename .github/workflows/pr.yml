@@ -76,6 +76,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          # Why: the default pull_request merge ref has two parents, so the shared diff-base
+          # resolver intentionally selects HEAD^1 and would discard the verified upstream
+          # baseline. Static analysis must inspect the exact reviewed PR head instead.
+          ref: ${{ github.event.pull_request.head.sha }}
           # Why blob:none: full history is needed for the merge-base diff, but historical
           # file contents are not. Blobs are ~89% of this repo's pack, and Git fetches the
           # few this job actually reads on demand.
