@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "name": "KTW Orca v1.4.192 one-shot 與 completion 相容層",
+  "generatedBy": "Codex 2026-08-31 07:13 +0800",
+  "officialVersion": "1.4.192",
+  "officialBaseSha": "ce4df07736baa38d742613bd68d5a3d845f79d25",
+  "patchFile": "0001-KTW-one-shot與completion相容層.patch",
+  "patchSha256": "438742ddb389a020d883eb2c216d69e2a79310d88e52f59da0558ef9bdbdd4cb",
+  "outputTreeSha": "2e4d09c1dc8d92f612527204ca2ef82560fe6c96",
+  "sourceCommits": [
+    "d2d981c424b4c3f10d1cedc7581cd8c8c53d0b03",
+    "acf807102762fdc8420cad0080ca341a58d4d618",
+    "d03f13375d8bb2e9ece0dd3a6b8426aa2319ddfb",
+    "86299cd94d77333e01942f1ffc28994650ab149c",
+    "278d8b7fb1ab12e4a353438cc2b1c2d75fe18765",
+    "33eacbad80d1a7103b6a9f708f3953ab573df910",
+    "652b21a7e248fdfbbf40b4e21b07932337b30a3f",
+    "afcc471cf54194c346ce7cc5a7f9ac990dd1b84e",
+    "69afbeea86b0efa328283d30ec49031a90a7487d"
+  ],
+  "allowedPaths": [
+    "src/main/automations/run-completion-watcher.test.ts",
+    "src/main/automations/run-completion-watcher.ts",
+    "src/main/automations/runtime-terminal-run-observer.test.ts",
+    "src/main/automations/runtime-terminal-run-observer.ts",
+    "src/main/persistence-automations.test.ts",
+    "src/main/persistence/scheduling-automations/automation-run-operations.ts",
+    "src/renderer/src/hooks/useAutomationDispatchEvents.test.ts",
+    "src/renderer/src/hooks/useAutomationDispatchEvents.ts",
+    "src/renderer/src/lib/agent-background-session-contract.ts",
+    "src/renderer/src/lib/automation-one-shot-startup.test.ts",
+    "src/renderer/src/lib/automation-one-shot-startup.ts",
+    "src/renderer/src/lib/launch-agent-background-session.test.ts",
+    "src/renderer/src/lib/launch-agent-background-session.ts",
+    "src/shared/automations-types.ts",
+    "src/shared/tui-agent-startup.test.ts",
+    "src/shared/tui-agent-startup.ts"
+  ]
+}

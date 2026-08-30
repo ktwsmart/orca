@@ -127,6 +127,11 @@ jobs:
           "${{ steps.change_baseline.outputs.sha }}"
           "${{ steps.change_baseline.outputs.source_url }}"
 
+      - name: Verify KTW release overlay
+        run: >-
+          node config/scripts/verify-ktw-release-overlay.mjs
+          config/ktw-release-overlays/v1.4.192/manifest.json
+
       - name: Lint
         run: pnpm exec oxlint --format github
 
