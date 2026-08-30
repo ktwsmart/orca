@@ -91,13 +91,9 @@ export function planAutomationOneShotStartup(args: {
       promptInjectionMode: 'flag-prompt'
     }
   }
-  // An output format does not itself guarantee Cursor exits. Process-exit authority
-  // is safe only when the native print flag is explicitly present in the final argv.
-  const hasPrint = tokenized.tokens.some((token) => {
-    const name = optionName(token)
-    return name === '--print' || name === '-p'
-  })
-  const agentArgs = hasPrint ? normalizedAgentArgs : `${normalizedAgentArgs} --print`.trim()
+  // Always append a final native print flag. A print-looking token may actually be
+  // another option's value, while duplicate boolean flags are accepted by Cursor.
+  const agentArgs = `${normalizedAgentArgs} --print`.trim()
   return { enabled: true, agentArgs, shell, promptInjectionMode: undefined }
 }
 

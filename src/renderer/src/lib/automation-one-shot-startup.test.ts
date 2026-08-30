@@ -25,20 +25,20 @@ const base = {
 describe('automation one-shot startup', () => {
   beforeEach(() => mockGetClientLoginShell.mockReturnValue('/bin/zsh'))
 
-  it('adds Cursor print exactly once using parsed tokens', () => {
+  it('appends a final Cursor print flag without guessing whether earlier tokens are values', () => {
     expect(planAutomationOneShotStartup(base)).toMatchObject({
       enabled: true,
       agentArgs: '--trust --model grok --print',
       shell: 'posix'
     })
     expect(planAutomationOneShotStartup({ ...base, agentArgs: '--trust -p' }).agentArgs).toBe(
-      '--trust -p'
+      '--trust -p --print'
     )
     expect(
       planAutomationOneShotStartup({ ...base, agentArgs: "--model 'name -p'" }).agentArgs
     ).toBe("--model 'name -p' --print")
     expect(planAutomationOneShotStartup({ ...base, agentArgs: '--print=json' }).agentArgs).toBe(
-      '--print=json'
+      '--print=json --print'
     )
     expect(
       planAutomationOneShotStartup({ ...base, agentArgs: '--output-format json' }).agentArgs

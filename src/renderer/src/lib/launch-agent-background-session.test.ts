@@ -118,7 +118,7 @@ describe('launchAgentBackgroundSession', () => {
     expect(result?.completionAuthority).toBe('process-exit')
   })
 
-  it('forces Cursor print mode for one-shot automation without duplicating a configured flag', async () => {
+  it('forces a final Cursor print flag for one-shot automation', async () => {
     Object.assign(state.settings, { agentDefaultArgs: { cursor: '--trust --model grok' } })
     const { launchAgentBackgroundSession } = await import('./launch-agent-background-session')
 
