@@ -98,10 +98,11 @@ export function registerWorktreeRootsForRepo(
   repoId: string,
   worktreeRoots: string[]
 ): void {
-  registeredWorktreeRootsRevision += 1
   const localRepoIds = new Set(getLocalRepos(store).map((repo) => repo.id))
+  let removedStaleRepo = false
   for (const registeredRepoId of registeredWorktreeRootsByRepo.keys()) {
     if (!localRepoIds.has(registeredRepoId)) {
+      removedStaleRepo = true
       registeredWorktreeRootsByRepo.delete(registeredRepoId)
       registeredWorktreeRootRepoIds.delete(registeredRepoId)
       registeredWorktreeRootsRevisionByRepo.set(
@@ -112,12 +113,33 @@ export function registerWorktreeRootsForRepo(
   }
 
   if (!localRepoIds.has(repoId)) {
+    registeredWorktreeRootsRevision += 1
     refreshRegisteredWorktreeRoots()
     registeredWorktreeRootsDirty = !allLocalRepoRootsRegistered(localRepoIds)
     return
   }
 
-  registeredWorktreeRootsByRepo.set(repoId, new Set(worktreeRoots.map((root) => resolve(root))))
+  const normalizedRoots = new Set(worktreeRoots.map((root) => resolve(root)))
+  const existingRoots = registeredWorktreeRootsByRepo.get(repoId)
+  if (
+    existingRoots &&
+    existingRoots.size === normalizedRoots.size &&
+    [...normalizedRoots].every((root) => existingRoots.has(root))
+  ) {
+    // Why: cached/coalesced followers can report the same attested roots while
+    // the fresh producer awaits metadata pruning. Treating that repetition as
+    // a newer observation bumps the revision fence and suppresses the sole
+    // lineage prune owner.
+    if (removedStaleRepo) {
+      registeredWorktreeRootsRevision += 1
+    }
+    refreshRegisteredWorktreeRoots()
+    registeredWorktreeRootsDirty = !allLocalRepoRootsRegistered(localRepoIds)
+    return
+  }
+
+  registeredWorktreeRootsRevision += 1
+  registeredWorktreeRootsByRepo.set(repoId, normalizedRoots)
   registeredWorktreeRootRepoIds.add(repoId)
   registeredWorktreeRootsRevisionByRepo.set(repoId, ++registeredWorktreeRootsRevisionSequence)
   refreshRegisteredWorktreeRoots()
