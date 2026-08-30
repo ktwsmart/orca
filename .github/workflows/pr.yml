@@ -95,6 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           baseline="$BASE_SHA"
+          source_url="https://github.com/${{ github.repository }}.git"
           for candidate in $(git rev-list --first-parent "$BASE_SHA..$HEAD_SHA"); do
             read -r -a parents <<<"$(git show -s --format=%P "$candidate")"
             if [ "${#parents[@]}" -ne 2 ] || [ "${parents[0]}" != "$BASE_SHA" ]; then
@@ -105,11 +106,22 @@ jobs:
               main:refs/remotes/verified-upstream/main
             if git merge-base --is-ancestor "${parents[1]}" refs/remotes/verified-upstream/main; then
               baseline="${parents[1]}"
+              source_url="https://github.com/stablyai/orca.git"
               echo "Verified upstream-sync baseline: $baseline via $candidate"
               break
             fi
           done
           echo "sha=$baseline" >> "$GITHUB_OUTPUT"
+          echo "source_url=$source_url" >> "$GITHUB_OUTPUT"
+
+      # Why: blob:none keeps checkout small, but reading many historical source blobs one at a
+      # time makes large upstream-sync PRs issue a long sequence of lazy fetches. Fetch the exact
+      # baseline blob ids in bounded batches so changed-code analysis remains deterministic.
+      - name: Prefetch changed-code baseline blobs
+        run: >-
+          node config/scripts/prefetch-changed-code-baseline-blobs.mjs
+          "${{ steps.change_baseline.outputs.sha }}"
+          "${{ steps.change_baseline.outputs.source_url }}"
 
       - name: Lint
         run: pnpm exec oxlint --format github
