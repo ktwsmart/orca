@@ -28,6 +28,7 @@ const mockPasteDraftWhenAgentReady = vi.fn()
 const mockMarkTrusted = vi.fn()
 const mockDispatchEvent = vi.fn()
 const mockGetAgentLaunchPlatformForRepo = vi.fn<() => NodeJS.Platform>()
+const mockGetClientLoginShell = vi.fn(() => '/bin/zsh')
 const state = createAgentBackgroundSessionTestState({
   createTab: mockCreateTab,
   setTabCustomTitle: mockSetTabCustomTitle,
@@ -39,7 +40,8 @@ const state = createAgentBackgroundSessionTestState({
 
 describe('automation one-shot command planning', () => {
   it('adds Cursor print mode once', async () => {
-    const { resolveAutomationOneShotAgentArgs } = await import('./agent-background-session-contract')
+    const { resolveAutomationOneShotAgentArgs } =
+      await import('./agent-background-session-contract')
 
     expect(resolveAutomationOneShotAgentArgs('cursor', '--trust --model grok')).toBe(
       '--trust --model grok --print'
@@ -47,7 +49,9 @@ describe('automation one-shot command planning', () => {
     expect(resolveAutomationOneShotAgentArgs('cursor', '--trust -p --model grok')).toBe(
       '--trust -p --model grok'
     )
-    expect(resolveAutomationOneShotAgentArgs('antigravity', '--model sonnet')).toBe('--model sonnet')
+    expect(resolveAutomationOneShotAgentArgs('antigravity', '--model sonnet')).toBe(
+      '--model sonnet'
+    )
   })
 
   it.each([
@@ -70,6 +74,43 @@ describe('automation one-shot command planning', () => {
       completionAuthority: 'agent-status'
     })
   })
+
+  it('limits one-shot to local Cursor/Antigravity and resolves fish from login shell', async () => {
+    mockGetClientLoginShell.mockReturnValue('/opt/homebrew/bin/fish')
+    const { resolveAutomationOneShotContext } = await import('./agent-background-session-contract')
+    const localHost = { platform: 'darwin' as const, connectionId: null }
+
+    expect(
+      resolveAutomationOneShotContext(true, 'cursor', '--trust', localHost, 'local', undefined)
+    ).toMatchObject({ enabled: true, shell: 'fish', agentArgs: '--trust --print' })
+    expect(
+      resolveAutomationOneShotContext(true, 'claude', '', localHost, 'local', undefined).enabled
+    ).toBe(false)
+    expect(
+      resolveAutomationOneShotContext(
+        true,
+        'cursor',
+        '',
+        { platform: 'darwin', connectionId: 'ssh-1' },
+        'local',
+        undefined
+      ).enabled
+    ).toBe(false)
+    expect(
+      resolveAutomationOneShotContext(true, 'cursor', '', localHost, 'environment', undefined)
+        .enabled
+    ).toBe(false)
+    expect(
+      resolveAutomationOneShotContext(
+        true,
+        'cursor',
+        '',
+        { platform: 'win32', connectionId: null },
+        'local',
+        'powershell'
+      ).enabled
+    ).toBe(false)
+  })
 })
 let currentStoreState = state
 
@@ -79,6 +120,8 @@ vi.mock('@/store', () => ({
     subscribe: vi.fn(() => () => {})
   }
 }))
+
+vi.mock('@/lib/client-login-shell', () => ({ getClientLoginShell: mockGetClientLoginShell }))
 
 vi.mock('@/lib/telemetry', () => ({
   track: vi.fn(),
@@ -104,6 +147,7 @@ vi.mock('@/components/terminal-pane/pty-data-sidecar-subscriptions', () => ({
 
 describe('launchAgentBackgroundSession', () => {
   beforeEach(() => {
+    mockGetClientLoginShell.mockReturnValue('/bin/zsh')
     currentStoreState = state
     resetAgentBackgroundSessionTestHarness({
       state,

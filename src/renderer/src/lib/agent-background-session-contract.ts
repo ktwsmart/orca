@@ -4,10 +4,12 @@ import type { TuiAgent } from '../../../shared/types'
 import type { AgentStartupPlan } from '@/lib/tui-agent-startup'
 import type { AutomationTerminalOwnership } from '@/lib/automation-terminal-ownership'
 import {
+  resolveLoginShellStartupDialect,
   resolveStartupShell,
   type AgentStartupShell
 } from '../../../shared/tui-agent-startup-shell'
 import type { AgentPromptInjectionMode } from '../../../shared/tui-agent-config'
+import { getClientLoginShell } from '@/lib/client-login-shell'
 
 export function resolveAutomationOneShotAgentArgs(agent: string, agentArgs: string): string {
   if (agent !== 'cursor' || /(^|\s)(?:-p|--print)(?=\s|$)/.test(agentArgs)) {
@@ -21,6 +23,35 @@ export function automationPromptInjectionMode(
   oneShot: boolean | undefined
 ): AgentPromptInjectionMode | undefined {
   return oneShot && agent === 'antigravity' ? 'flag-prompt' : undefined
+}
+
+export function resolveAutomationOneShotContext(
+  requested: boolean | undefined,
+  agent: string,
+  agentArgs: string,
+  launchHost: { platform: NodeJS.Platform; connectionId?: string | null },
+  runtimeKind: 'local' | 'environment',
+  startupShell: AgentStartupShell | undefined
+): {
+  enabled: boolean
+  agentArgs: string
+  shell: AgentStartupShell
+  promptInjectionMode: AgentPromptInjectionMode | undefined
+} {
+  const enabled =
+    requested === true &&
+    (agent === 'cursor' || agent === 'antigravity') &&
+    !launchHost.connectionId &&
+    runtimeKind !== 'environment' &&
+    launchHost.platform !== 'win32'
+  return {
+    enabled,
+    agentArgs: enabled ? resolveAutomationOneShotAgentArgs(agent, agentArgs) : agentArgs,
+    shell: enabled
+      ? resolveLoginShellStartupDialect(getClientLoginShell())
+      : resolveStartupShell(launchHost.platform, startupShell),
+    promptInjectionMode: automationPromptInjectionMode(agent, enabled)
+  }
 }
 
 export function wrapAutomationOneShotCommand(
@@ -39,26 +70,20 @@ export function wrapAutomationOneShotCommand(
       completionAuthority: 'process-exit'
     }
   }
-  if (shell === 'powershell') {
-    return {
-      command: `& { ${command} }; $orcaSucceeded = $?; $orcaStatus = $LASTEXITCODE; if ($null -eq $orcaStatus) { $orcaStatus = if ($orcaSucceeded) { 0 } else { 1 } }; exit $orcaStatus`,
-      completionAuthority: 'process-exit'
-    }
-  }
-  // cmd.exe cannot safely preserve delayed ERRORLEVEL through arbitrary quoted commands.
+  // Windows/WSL keep the existing agent-status authority; the renderer cannot safely
+  // infer the effective shell or a fresh LASTEXITCODE for arbitrary native commands.
   return { command, completionAuthority: 'agent-status' }
 }
 
 export function applyAutomationOneShotStartup(
   plan: AgentStartupPlan,
   enabled: boolean | undefined,
-  platform: NodeJS.Platform,
-  shell: AgentStartupShell | undefined
+  shell: AgentStartupShell
 ): 'agent-status' | 'process-exit' {
   if (!enabled) {
     return 'agent-status'
   }
-  const wrapped = wrapAutomationOneShotCommand(plan.launchCommand, resolveStartupShell(platform, shell))
+  const wrapped = wrapAutomationOneShotCommand(plan.launchCommand, shell)
   plan.launchCommand = wrapped.command
   return wrapped.completionAuthority
 }

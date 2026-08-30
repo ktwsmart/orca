@@ -738,6 +738,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
     } = {}
     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
       launchArgs = args
+      args.onAgentStatus?.({ state: 'done' })
       return {
         tabId: 'agent-tab',
         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
