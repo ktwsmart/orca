@@ -12,10 +12,7 @@ import { TUI_AGENT_CONFIG } from '../../../shared/tui-agent-config'
 import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
 import { isWslUncPath } from '../../../shared/wsl-paths'
 import { CLIENT_PLATFORM } from '@/lib/new-workspace'
-import {
-  isPrintModeHeadlessOneShotCommand,
-  optionName
-} from '../../../shared/print-mode-headless-command'
+import { optionName } from '../../../shared/print-mode-headless-command'
 
 export type AutomationOneShotStartupPlan = {
   enabled: boolean
@@ -59,7 +56,8 @@ export function planAutomationOneShotStartup(args: {
   }
 
   const shell = resolveLoginShellStartupDialect(args.loginShell?.trim() || getClientLoginShell())
-  const tokenized = tokenizeStartupCommand(args.agentArgs, shell)
+  const normalizedAgentArgs = args.agentArgs.trim()
+  const tokenized = tokenizeStartupCommand(normalizedAgentArgs, shell)
   if (
     !tokenized.ok ||
     tokenized.tokens.includes('--') ||
@@ -76,7 +74,7 @@ export function planAutomationOneShotStartup(args: {
     if (
       tokenized.tokens.some((token) => {
         const name = optionName(token)
-        return name === '-i' || name === '--prompt-interactive'
+        return name === '-i' || name === '--prompt-interactive' || name === '--prompt'
       })
     ) {
       return {
@@ -86,10 +84,20 @@ export function planAutomationOneShotStartup(args: {
         promptInjectionMode: undefined
       }
     }
-    return { enabled: true, agentArgs: args.agentArgs, shell, promptInjectionMode: 'flag-prompt' }
+    return {
+      enabled: true,
+      agentArgs: normalizedAgentArgs,
+      shell,
+      promptInjectionMode: 'flag-prompt'
+    }
   }
-  const hasPrint = isPrintModeHeadlessOneShotCommand(['cursor-agent', ...tokenized.tokens])
-  const agentArgs = hasPrint ? args.agentArgs : `${args.agentArgs.trim()} --print`.trim()
+  // An output format does not itself guarantee Cursor exits. Process-exit authority
+  // is safe only when the native print flag is explicitly present in the final argv.
+  const hasPrint = tokenized.tokens.some((token) => {
+    const name = optionName(token)
+    return name === '--print' || name === '-p'
+  })
+  const agentArgs = hasPrint ? normalizedAgentArgs : `${normalizedAgentArgs} --print`.trim()
   return { enabled: true, agentArgs, shell, promptInjectionMode: undefined }
 }
 

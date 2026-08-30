@@ -40,6 +40,9 @@ describe('automation one-shot startup', () => {
     expect(planAutomationOneShotStartup({ ...base, agentArgs: '--print=json' }).agentArgs).toBe(
       '--print=json'
     )
+    expect(
+      planAutomationOneShotStartup({ ...base, agentArgs: '--output-format json' }).agentArgs
+    ).toBe('--output-format json --print')
   })
 
   it('uses Antigravity native one-shot prompt mode', () => {
@@ -66,6 +69,13 @@ describe('automation one-shot startup', () => {
         ...base,
         agent: 'antigravity',
         agentArgs: '--prompt-interactive=true'
+      }).enabled
+    ).toBe(false)
+    expect(
+      planAutomationOneShotStartup({
+        ...base,
+        agent: 'antigravity',
+        agentArgs: '--prompt existing'
       }).enabled
     ).toBe(false)
   })
