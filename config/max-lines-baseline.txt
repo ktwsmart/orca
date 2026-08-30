@@ -2,7 +2,6 @@
 # This is a RATCHET: the list may only SHRINK. Do NOT add entries to get CI green —
 # split the oversized file instead (AGENTS.md → "Do Not Disable Max Lines").
 # Regenerate/prune: pnpm check:max-lines-ratchet --prune   (removes stale entries only)
-inline src/cli/handlers/account.ts
 inline src/cli/handlers/orchestration.ts
 inline src/main/agent-hooks/server.ts
 inline src/main/browser/agent-browser-bridge.ts
@@ -17,7 +16,6 @@ inline src/main/runtime/orca-runtime-browser.ts
 inline src/main/runtime/orca-runtime-files.ts
 inline src/main/runtime/orca-runtime.test.ts
 inline src/main/runtime/orca-runtime.ts
-inline src/main/runtime/rpc/methods/orchestration-workers.ts
 inline src/main/runtime/rpc/methods/orchestration.ts
 inline src/main/ssh/ssh-channel-multiplexer.ts
 inline src/main/ssh/ssh-connection.ts
@@ -34,7 +32,6 @@ inline src/renderer/src/components/editor/CombinedDiffViewer.tsx
 inline src/renderer/src/components/editor/MarkdownPreview.tsx
 inline src/renderer/src/components/floating-terminal/FloatingTerminalPanel.tsx
 inline src/renderer/src/components/new-workspace/SmartWorkspaceNameField.tsx
-inline src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
 inline src/renderer/src/components/status-bar/StatusBar.tsx
 inline src/renderer/src/components/status-bar/WorkspaceSpaceManagerPanel.tsx
 inline src/renderer/src/components/terminal-pane/TerminalPane.tsx

@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- KTW managed-account pinning predates the upstream split; retain the reviewed compatibility surface during this sync. */
 import type { TuiAgent } from '../../../../shared/tui-agent'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
@@ -20,17 +19,17 @@ import {
   persistWorkerSetupWaitOutcome
 } from './orchestration-worker-setup-gate'
 import {
-  assertManagedAccountRequestSupported,
-  verifyWorkerLaunchAccount
+  assertWorkerStartManagedAccountRequest,
+  verifyRequestedWorkerLaunchAccount
 } from './orchestration-worker-account-verification'
 import { failWorkerStartWithReceipt } from './orchestration-worker-start-receipt'
-import { prepareLocalWorkerStart } from './orchestration-worker-start-validation'
+import {
+  assertReusableWorkerTerminal,
+  prepareLocalWorkerStart,
+  resolveWorkerStartReadinessTimeoutOrThrow
+} from './orchestration-worker-start-validation'
 import { resolveDispatchCreator } from './orchestration-dispatch-creator'
 import { resolveOrchestrationCaller } from './orchestration-run-scope'
-import {
-  isWorkerStartTimeoutWithinTimerLimit,
-  resolveWorkerStartReadinessTimeoutMs
-} from '../../../../shared/orchestration-timing-budgets'
 
 export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
   defineMethod({
@@ -40,13 +39,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
       params,
       { runtime, orchestrationMutation, orchestrationCompatibilityEvidence }
     ) => {
-      if (!isWorkerStartTimeoutWithinTimerLimit(params.timeoutMs)) {
-        throw new OrchestrationError(
-          'invalid_argument',
-          `--timeout-ms is too large for worker-start transport grace; the derived timeout must fit within the timer limit.`
-        )
-      }
-      const readinessTimeoutMs = resolveWorkerStartReadinessTimeoutMs(params.timeoutMs)
+      const readinessTimeoutMs = resolveWorkerStartReadinessTimeoutOrThrow(params.timeoutMs)
       const db = runtime.getOrchestrationDb()
       // Why: worker-start was the only Run-scoped verb that skipped this, so a
       // declared --from could name someone else's pane and inherit their depth.
@@ -69,14 +62,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         )
       }
 
-      // Why: the guard must run before the federated branch — a direct RPC with --on would
-      // otherwise bypass it entirely while the federated path silently ignores managedAccount.
-      assertManagedAccountRequestSupported({
-        managedAccount: params.managedAccount,
-        terminal: params.terminal,
-        agent: params.agent,
-        on: params.on
-      })
+      assertWorkerStartManagedAccountRequest(params)
 
       if (params.on) {
         return startFederatedWorker({
@@ -110,22 +96,11 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         : requestedWorktree === 'current'
           ? await runtime.showManagedTerminalWorkspace(`id:${coordinatorTerminal.worktreeId}`)
           : await runtime.showManagedTerminalWorkspace(requestedWorktree)
-      let explicitTerminal
-      if (params.terminal) {
-        explicitTerminal = await runtime.showTerminal(params.terminal)
-        if (explicitTerminal.worktreeId !== resolvedWorktree?.id) {
-          throw new OrchestrationError(
-            'terminal_worktree_mismatch',
-            `Terminal ${params.terminal} does not belong to worktree ${resolvedWorktree?.id}.`
-          )
-        }
-        if (!(await runtime.isTerminalRunningAgent(params.terminal))) {
-          throw new OrchestrationError(
-            'agent_unconfigured',
-            `Terminal ${params.terminal} is not running a recognized agent.`
-          )
-        }
-      }
+      await assertReusableWorkerTerminal({
+        runtime,
+        terminal: params.terminal,
+        resolvedWorktreeId: resolvedWorktree?.id
+      })
 
       const startOptions = {
         worktree: requestedWorktree,
@@ -249,16 +224,16 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         }
         if (params.managedAccount) {
           failedStage = 'account_verification'
-          await verifyWorkerLaunchAccount({
-            runtime,
-            db,
-            dispatchId: started.dispatch.id,
-            worktreeId: resolvedWorktree.id,
-            terminalHandle,
-            managedAccountId: params.managedAccount.id,
-            effects
-          })
         }
+        await verifyRequestedWorkerLaunchAccount({
+          runtime,
+          db,
+          dispatchId: started.dispatch.id,
+          worktreeId: resolvedWorktree.id,
+          terminalHandle,
+          managedAccountId: params.managedAccount?.id,
+          effects
+        })
         const terminalAuthority = requireWorkerAuthority(runtime, terminalHandle)
         const capability = db.prepareStartingWorkerAuthority({
           dispatchId: started.dispatch.id,

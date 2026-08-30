@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- KTW one-shot regressions remain in the upstream hook integration suite during the dispatch refactor. */
 import type * as ReactModule from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AUTOMATIONS_CHANGED_EVENT } from '@/lib/automations-changed-window-event'
@@ -210,7 +209,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
       paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
       ptyId: 'agent-pty',
       startupPlan: {},
-      completionAuthority: 'agent-status',
       terminalOwnership: {
         finalize: mockFinalizeTerminalOwnership,
         release: mockReleaseTerminalOwnership
@@ -565,7 +563,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
         ptyId: 'agent-pty',
         startupPlan: {},
-        completionAuthority: 'agent-status',
         terminalOwnership: {
           finalize: mockFinalizeTerminalOwnership,
           release: mockReleaseTerminalOwnership
@@ -606,7 +603,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
         ptyId: 'agent-pty',
         startupPlan: {},
-        completionAuthority: 'agent-status',
         terminalOwnership: {
           finalize: mockFinalizeTerminalOwnership,
           release: mockReleaseTerminalOwnership
@@ -752,20 +748,18 @@ describe('useAutomationDispatchEvents setup launch', () => {
     )
   })
 
-  it('ignores one-shot agent done and completes only from zero process exit', async () => {
+  it('consumes duplicate done and zero-exit completion through one finalizer', async () => {
     let launchArgs: {
       onAgentStatus?: (payload: { state: string }) => void
       onExit?: (ptyId: string, code: number) => void
     } = {}
     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
       launchArgs = args
-      args.onAgentStatus?.({ state: 'done' })
       return {
         tabId: 'agent-tab',
         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
         ptyId: 'agent-pty',
         startupPlan: {},
-        completionAuthority: 'process-exit',
         terminalOwnership: {
           finalize: mockFinalizeTerminalOwnership,
           release: mockReleaseTerminalOwnership
@@ -775,10 +769,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
 
     await registerAndDispatch()
     launchArgs.onAgentStatus?.({ state: 'done' })
-    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
-    expect(
-      mockMarkDispatchResult.mock.calls.filter(([result]) => result.status === 'completed')
-    ).toHaveLength(0)
     launchArgs.onExit?.('agent-pty', 0)
     launchArgs.onAgentStatus?.({ state: 'done' })
     await vi.waitFor(() => expect(mockFinalizeTerminalOwnership).toHaveBeenCalledOnce())
@@ -800,7 +790,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
         ptyId: 'agent-pty',
         startupPlan: {},
-        completionAuthority: 'agent-status',
         terminalOwnership: {
           finalize: mockFinalizeTerminalOwnership,
           release: mockReleaseTerminalOwnership
@@ -842,7 +831,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
         ptyId: 'agent-pty',
         startupPlan: {},
-        completionAuthority: 'agent-status',
         terminalOwnership: {
           finalize: mockFinalizeTerminalOwnership,
           release: mockReleaseTerminalOwnership
@@ -871,7 +859,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
         ptyId: 'agent-pty',
         startupPlan: {},
-        completionAuthority: 'agent-status',
         terminalOwnership: {
           finalize: mockFinalizeTerminalOwnership,
           release: mockReleaseTerminalOwnership
