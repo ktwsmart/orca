@@ -14,6 +14,7 @@ const base = {
   agent: 'cursor' as const,
   agentArgs: '--trust --model grok',
   hasCommandOverride: false,
+  hasPrompt: true,
   platform: 'darwin' as const,
   startupShell: undefined,
   hasConnection: false,
@@ -36,6 +37,9 @@ describe('automation one-shot startup', () => {
     expect(
       planAutomationOneShotStartup({ ...base, agentArgs: "--model 'name -p'" }).agentArgs
     ).toBe("--model 'name -p' --print")
+    expect(planAutomationOneShotStartup({ ...base, agentArgs: '--print=json' }).agentArgs).toBe(
+      '--print=json'
+    )
   })
 
   it('uses Antigravity native one-shot prompt mode', () => {
@@ -51,6 +55,8 @@ describe('automation one-shot startup', () => {
     ['environment', { isEnvironment: true }],
     ['WSL', { isWsl: true }],
     ['Windows', { platform: 'win32' as const }],
+    ['Windows client with Linux launch preference', { clientPlatform: 'win32' as const }],
+    ['blank prompt', { hasPrompt: false }],
     ['other agent', { agent: 'claude' as const }]
   ])('fails closed for %s', (_label, override) => {
     expect(planAutomationOneShotStartup({ ...base, ...override }).enabled).toBe(false)
@@ -60,6 +66,10 @@ describe('automation one-shot startup', () => {
     expect(
       planAutomationOneShotStartup({ ...base, agentArgs: '--model "unterminated' }).enabled
     ).toBe(false)
+  })
+
+  it('fails closed when an option terminator makes appended print a prompt token', () => {
+    expect(planAutomationOneShotStartup({ ...base, agentArgs: '-- -p' }).enabled).toBe(false)
   })
 
   it('uses the real fish dialect and preserves process exit status', () => {

@@ -11,6 +11,8 @@ import type { TuiAgent } from '../../../shared/types'
 import { TUI_AGENT_CONFIG } from '../../../shared/tui-agent-config'
 import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
 import { isWslUncPath } from '../../../shared/wsl-paths'
+import { CLIENT_PLATFORM } from '@/lib/new-workspace'
+import { isPrintModeHeadlessOneShotCommand } from '../../../shared/print-mode-headless-command'
 
 export type AutomationOneShotStartupPlan = {
   enabled: boolean
@@ -24,6 +26,8 @@ export function planAutomationOneShotStartup(args: {
   agent: TuiAgent
   agentArgs: string
   hasCommandOverride: boolean
+  hasPrompt: boolean
+  clientPlatform?: NodeJS.Platform
   platform: NodeJS.Platform
   startupShell: AgentStartupShell | undefined
   hasConnection: boolean
@@ -35,10 +39,12 @@ export function planAutomationOneShotStartup(args: {
     args.requested === true &&
     (args.agent === 'cursor' || args.agent === 'antigravity') &&
     !args.hasCommandOverride &&
+    args.hasPrompt &&
     !args.hasConnection &&
     !args.isEnvironment &&
     !args.isWsl &&
-    args.platform !== 'win32'
+    args.platform !== 'win32' &&
+    (args.clientPlatform ?? CLIENT_PLATFORM) !== 'win32'
   if (!eligible) {
     return {
       enabled: false,
@@ -53,7 +59,7 @@ export function planAutomationOneShotStartup(args: {
     return { enabled: true, agentArgs: args.agentArgs, shell, promptInjectionMode: 'flag-prompt' }
   }
   const tokenized = tokenizeStartupCommand(args.agentArgs, shell)
-  if (!tokenized.ok) {
+  if (!tokenized.ok || tokenized.tokens.includes('--')) {
     return {
       enabled: false,
       agentArgs: args.agentArgs,
@@ -61,7 +67,7 @@ export function planAutomationOneShotStartup(args: {
       promptInjectionMode: undefined
     }
   }
-  const hasPrint = tokenized.tokens.some((token) => token === '-p' || token === '--print')
+  const hasPrint = isPrintModeHeadlessOneShotCommand(['cursor-agent', ...tokenized.tokens])
   const agentArgs = hasPrint ? args.agentArgs : `${args.agentArgs.trim()} --print`.trim()
   return { enabled: true, agentArgs, shell, promptInjectionMode: undefined }
 }
@@ -107,19 +113,20 @@ export function buildAutomationBackgroundStartup(args: {
     isRemote: args.launchHost.isRemote,
     terminalWindowsShell: args.terminalWindowsShell
   })
+  const trimmedPrompt = args.prompt?.trim() ?? ''
+  const hasPrompt = trimmedPrompt.length > 0
   const oneShot = planAutomationOneShotStartup({
     requested: args.oneShotRequested,
     agent: args.agent,
     agentArgs: args.agentArgs,
     hasCommandOverride: Boolean(args.cmdOverrides[args.agent]?.trim()),
+    hasPrompt,
     platform: args.launchHost.platform,
     startupShell,
     hasConnection: Boolean(args.launchHost.connectionId),
     isEnvironment: args.runtimeKind === 'environment',
     isWsl: isWslUncPath(args.worktreePath)
   })
-  const trimmedPrompt = args.prompt?.trim() ?? ''
-  const hasPrompt = trimmedPrompt.length > 0
   const isFollowupPath = TUI_AGENT_CONFIG[args.agent].promptInjectionMode === 'stdin-after-start'
   const plan = buildAgentStartupPlan({
     agent: args.agent,
