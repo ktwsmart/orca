@@ -289,6 +289,12 @@ describe('PR Checks skip wiring', () => {
     expect(classify.run).toContain('--merge-base \\\n  "$BASE_SHA" "$HEAD_SHA"')
     expect(classify.run).toContain('node config/scripts/pr-code-change-scope.mjs "$changed_file"')
     expect(classify.run).toContain('tee -a "$GITHUB_OUTPUT"')
+    const baseline = prWorkflow.jobs.static_analysis.steps.find(
+      (step) => step.name === 'Resolve trustworthy changed-code baseline'
+    )
+    expect(baseline.run).toContain('git rev-list --first-parent "$BASE_SHA..$HEAD_SHA"')
+    expect(baseline.run).toContain('[ "${parents[0]}" != "$BASE_SHA" ]')
+    expect(baseline.run).toContain('https://github.com/stablyai/orca.git')
     for (const jobName of ['should_run', 'native_cache_changed', ...expensiveJobs]) {
       expect(prWorkflow.jobs.code_paths.outputs[jobName], jobName).toBe(
         `\${{ steps.filter.outputs.${jobName} }}`

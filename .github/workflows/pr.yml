@@ -95,16 +95,20 @@ jobs:
         run: |
           set -euo pipefail
           baseline="$BASE_SHA"
-          read -r -a parents <<<"$(git show -s --format=%P "$HEAD_SHA")"
-          if [ "${#parents[@]}" -eq 2 ] && [ "${parents[0]}" = "$BASE_SHA" ]; then
+          for candidate in $(git rev-list --first-parent "$BASE_SHA..$HEAD_SHA"); do
+            read -r -a parents <<<"$(git show -s --format=%P "$candidate")"
+            if [ "${#parents[@]}" -ne 2 ] || [ "${parents[0]}" != "$BASE_SHA" ]; then
+              continue
+            fi
             git fetch --no-tags --filter=blob:none \
               https://github.com/stablyai/orca.git \
               main:refs/remotes/verified-upstream/main
             if git merge-base --is-ancestor "${parents[1]}" refs/remotes/verified-upstream/main; then
               baseline="${parents[1]}"
-              echo "Verified upstream-sync baseline: $baseline"
+              echo "Verified upstream-sync baseline: $baseline via $candidate"
+              break
             fi
-          fi
+          done
           echo "sha=$baseline" >> "$GITHUB_OUTPUT"
 
       - name: Lint
