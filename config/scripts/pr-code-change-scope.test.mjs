@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
@@ -258,6 +259,24 @@ describe('per-job path classification', () => {
     expect(result.stdout).toContain('package=false\n')
     expect(result.stdout).toContain('test=true\n')
   })
+
+  it('reads a large changed-path list from a file without a nonblocking stdin pipe', () => {
+    const root = mkdtempSync(join(tmpdir(), 'orca-pr-change-scope-'))
+    try {
+      const inputPath = join(root, 'changed-paths.txt')
+      writeFileSync(inputPath, `${'src/main/index.ts\n'.repeat(20_000)}`)
+      const result = spawnSync(
+        process.execPath,
+        ['config/scripts/pr-code-change-scope.mjs', inputPath],
+        { cwd: projectDir, encoding: 'utf8' }
+      )
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toContain('should_run=true\n')
+      expect(result.stdout).toContain('static_analysis=true\n')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('PR Checks skip wiring', () => {
@@ -267,8 +286,8 @@ describe('PR Checks skip wiring', () => {
     )
     expect(classify.run).toContain('--diff-filter=ACDMR')
     expect(classify.run).toContain('--no-renames')
-    expect(classify.run).toContain('--merge-base "$BASE_SHA" "$HEAD_SHA"')
-    expect(classify.run).toContain('node config/scripts/pr-code-change-scope.mjs')
+    expect(classify.run).toContain('--merge-base \\\n  "$BASE_SHA" "$HEAD_SHA"')
+    expect(classify.run).toContain('node config/scripts/pr-code-change-scope.mjs "$changed_file"')
     expect(classify.run).toContain('tee -a "$GITHUB_OUTPUT"')
     for (const jobName of ['should_run', 'native_cache_changed', ...expensiveJobs]) {
       expect(prWorkflow.jobs.code_paths.outputs[jobName], jobName).toBe(

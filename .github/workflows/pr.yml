@@ -59,10 +59,12 @@ jobs:
           set -euo pipefail
           # Why --no-renames: name-only rename detection can report only the destination.
           # A code file moved under docs/ must still expose its code-side deletion.
-          CHANGED="$(git diff --name-only --no-renames --diff-filter=ACDMR --merge-base "$BASE_SHA" "$HEAD_SHA")"
+          changed_file="$RUNNER_TEMP/pr-changed-paths.txt"
+          git diff --name-only --no-renames --diff-filter=ACDMR --merge-base \
+            "$BASE_SHA" "$HEAD_SHA" > "$changed_file"
           echo "Changed paths:"
-          printf '%s\n' "$CHANGED"
-          printf '%s\n' "$CHANGED" | node config/scripts/pr-code-change-scope.mjs | tee -a "$GITHUB_OUTPUT"
+          cat "$changed_file"
+          node config/scripts/pr-code-change-scope.mjs "$changed_file" | tee -a "$GITHUB_OUTPUT"
 
   static_analysis:
     name: static analysis
