@@ -46,7 +46,6 @@ export type RpcRequest = {
   authToken: string
   method: string
   params?: unknown
-  expectedRuntimeId?: string
   orchestrationCapability?: string
   orchestrationContractVersion?: number
   orchestrationRequestId?: string
@@ -105,6 +104,10 @@ export type RpcContext = {
   registerBinaryStreamHandler?: (
     streamId: number,
     handler: (frame: TerminalStreamFrame) => void
+  ) => () => void
+  // Why: non-terminal binary protocols own their dedicated authenticated subscription socket.
+  registerBinaryMessageHandler?: (
+    handler: (bytes: Uint8Array<ArrayBufferLike>) => void
   ) => () => void
 }
 

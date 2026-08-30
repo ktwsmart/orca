@@ -45,6 +45,9 @@ describe('orchestration workerStart managed-account pin', () => {
     vi.spyOn(runtime, 'showManagedWorktree').mockResolvedValue({
       id: 'repo::worktree'
     } as never)
+    vi.spyOn(runtime, 'showManagedTerminalWorkspace').mockResolvedValue({
+      id: 'repo::worktree'
+    } as never)
     vi.spyOn(runtime, 'createTerminal').mockResolvedValue({
       handle: 'term_worker',
       worktreeId: 'repo::worktree',

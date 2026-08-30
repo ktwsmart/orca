@@ -17,6 +17,7 @@ import {
 import { toHostReadableTranscriptPath, wslCodexSessionsDirs } from './host-readable-transcript-path'
 import { findWslCodexSessionPath } from './wsl-codex-session-path-scan'
 import { wslTranscriptFsRefusal, type WslTranscriptFsError } from './wsl-transcript-fs-gate'
+import { proveClaudeTranscriptBranch } from '../claude/claude-transcript-branch-proof'
 
 // Why: these mirror the path constants in ai-vault/session-scanner.ts. Reads
 // run in the main process against the runtime's own home directory; over SSH
@@ -108,6 +109,8 @@ export async function resolveSessionFilePath(
         return hostReadable
       }
     } catch (error) {
+      // A caller abort that races the refusal stays authoritative.
+      signal?.throwIfAborted()
       // Why: the id-based search may still hit; surface the refusal only when
       // it does not, so a stalled distro reads as unavailable, never "missing".
       unavailable = wslTranscriptFsRefusal(error)
@@ -119,6 +122,21 @@ export async function resolveSessionFilePath(
     throw unavailable
   }
   return resolved
+}
+
+/** Read and validate Claude's authoritative transcript branch marker. */
+export async function readClaudeTranscriptLeafUuid(
+  transcriptPath: string,
+  providerSessionId: string,
+  previousLeafUuid: string | null = null
+): Promise<string> {
+  return (
+    await proveClaudeTranscriptBranch({
+      transcriptPath,
+      providerSessionId,
+      previousLeafUuid
+    })
+  ).leafUuid
 }
 
 async function resolveSessionFileById(
@@ -232,6 +250,8 @@ async function findCodexRolloutInDirs(
         return files
       }
     } catch (error) {
+      // A caller abort that races the refusal stays authoritative.
+      signal?.throwIfAborted()
       // Why: one stalled distro must not hide another root's hit.
       unavailable = wslTranscriptFsRefusal(error)
     }

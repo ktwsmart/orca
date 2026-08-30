@@ -2,13 +2,12 @@ import { buildAgentStartupPlan, type AgentStartupPlan } from '@/lib/tui-agent-st
 import { getClientLoginShell } from '@/lib/client-login-shell'
 import type { AgentPromptInjectionMode } from '../../../shared/tui-agent-config'
 import {
-  resolveLoginShellStartupDialect,
   resolveStartupShell,
   tokenizeStartupCommand,
   type AgentStartupShell
 } from '../../../shared/tui-agent-startup-shell'
-import type { TuiAgent } from '../../../shared/types'
-import { TUI_AGENT_CONFIG } from '../../../shared/tui-agent-config'
+import type { TuiAgent } from '../../../shared/tui-agent'
+import { requireTuiAgentConfig } from '../../../shared/require-tui-agent-config'
 import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
 import { isWslUncPath } from '../../../shared/wsl-paths'
 import { CLIENT_PLATFORM } from '@/lib/new-workspace'
@@ -18,6 +17,7 @@ export type AutomationOneShotStartupPlan = {
   enabled: boolean
   agentArgs: string
   shell: AgentStartupShell
+  exitShell: 'posix' | 'fish'
   promptInjectionMode: AgentPromptInjectionMode | undefined
 }
 
@@ -51,11 +51,14 @@ export function planAutomationOneShotStartup(args: {
       enabled: false,
       agentArgs: args.agentArgs,
       shell: fallbackShell,
+      exitShell: 'posix',
       promptInjectionMode: undefined
     }
   }
 
-  const shell = resolveLoginShellStartupDialect(args.loginShell?.trim() || getClientLoginShell())
+  const loginShell = args.loginShell?.trim() || getClientLoginShell()
+  const shell = resolveStartupShell(args.platform, args.startupShell)
+  const exitShell = /(?:^|\/)fish$/.test(loginShell) ? 'fish' : 'posix'
   const normalizedAgentArgs = args.agentArgs.trim()
   const tokenized = tokenizeStartupCommand(normalizedAgentArgs, shell)
   if (
@@ -67,6 +70,7 @@ export function planAutomationOneShotStartup(args: {
       enabled: false,
       agentArgs: args.agentArgs,
       shell: fallbackShell,
+      exitShell: 'posix',
       promptInjectionMode: undefined
     }
   }
@@ -81,6 +85,7 @@ export function planAutomationOneShotStartup(args: {
         enabled: false,
         agentArgs: args.agentArgs,
         shell: fallbackShell,
+        exitShell: 'posix',
         promptInjectionMode: undefined
       }
     }
@@ -88,13 +93,14 @@ export function planAutomationOneShotStartup(args: {
       enabled: true,
       agentArgs: normalizedAgentArgs,
       shell,
+      exitShell,
       promptInjectionMode: 'flag-prompt'
     }
   }
   // Always append a final native print flag. A print-looking token may actually be
   // another option's value, while duplicate boolean flags are accepted by Cursor.
   const agentArgs = `${normalizedAgentArgs} --print`.trim()
-  return { enabled: true, agentArgs, shell, promptInjectionMode: undefined }
+  return { enabled: true, agentArgs, shell, exitShell, promptInjectionMode: undefined }
 }
 
 export function applyAutomationOneShotCommand(
@@ -105,7 +111,7 @@ export function applyAutomationOneShotCommand(
     return 'agent-status'
   }
   plan.launchCommand =
-    oneShot.shell === 'fish'
+    oneShot.exitShell === 'fish'
       ? `${plan.launchCommand}; set -l orca_status $status; exit $orca_status`
       : `${plan.launchCommand}; orca_status=$?; exit "$orca_status"`
   return 'process-exit'
@@ -153,7 +159,8 @@ export function buildAutomationBackgroundStartup(args: {
     isWsl: isWslUncPath(args.worktreePath),
     loginShell: args.agentEnv.SHELL
   })
-  const isFollowupPath = TUI_AGENT_CONFIG[args.agent].promptInjectionMode === 'stdin-after-start'
+  const isFollowupPath =
+    requireTuiAgentConfig(args.agent).promptInjectionMode === 'stdin-after-start'
   const plan = buildAgentStartupPlan({
     agent: args.agent,
     prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',

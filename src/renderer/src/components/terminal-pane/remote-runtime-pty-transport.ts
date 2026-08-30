@@ -19,13 +19,8 @@ import type {
   RuntimeTerminalResolvePane,
   RuntimeTerminalSend
 } from '../../../../shared/runtime-types'
-import {
-  AGENT_SESSION_HOST_AUTHORITY_RUNTIME_CAPABILITY,
-  AGENT_SESSION_OMP_RESUME_PATH_RUNTIME_CAPABILITY,
-  TERMINAL_ATTRIBUTION_REMOVED_RUNTIME_CAPABILITY,
-  TERMINAL_CREATE_IDEMPOTENCY_RUNTIME_CAPABILITY,
-  type RuntimeCapability
-} from '../../../../shared/protocol-version'
+import { TERMINAL_CREATE_IDEMPOTENCY_RUNTIME_CAPABILITY } from '../../../../shared/protocol-version'
+import { agentResumeHostAuthorityCapability } from '../../runtime/agent-resume-host-authority-capability'
 import {
   isTerminalInputTooLargeWithDeferredMeasurement,
   iterateTerminalInputChunks
@@ -37,11 +32,7 @@ import type {
   PtyTransportRecoveryState
 } from './pty-transport-types'
 import { createPtyOutputProcessor } from './pty-transport'
-import {
-  RuntimeRpcCallError,
-  unwrapRuntimeRpcResult,
-  type LiveRuntimeEnvironmentAuthority
-} from '../../runtime/runtime-rpc-client'
+import { RuntimeRpcCallError, unwrapRuntimeRpcResult } from '../../runtime/runtime-rpc-client'
 import {
   getRemoteRuntimePtyEnvironmentId,
   getRemoteRuntimeTerminalHandle,
@@ -90,21 +81,16 @@ import {
   ptyShutdownLifecycleHandlers
 } from './pty-shutdown-data-suspension'
 import { getRuntimeEnvironmentRevision } from '@/runtime/runtime-environment-revision'
-import {
-  addLegacyTerminalAttributionDisableRequest,
-  withLegacyTerminalAttributionDisabledEnv
-} from '../../../../shared/legacy-terminal-attribution-env'
 
 const REMOTE_TERMINAL_INPUT_FLUSH_MS = 8
 const REMOTE_TERMINAL_VIEWPORT_FLUSH_MS = 33
+const REMOTE_RUNTIME_MAX_PENDING_QUERY_REPLIES = 64
 const HOST_SESSION_ATTACH_POLL_MS = 150
 const HOST_SESSION_REPLACEMENT_POLL_MAX_MS = 1_000
 const HOST_SESSION_ATTACH_TIMEOUT_MS = 15_000
 const HOST_SESSION_INVENTORY_MAX_WINDOWS_PER_RECOVERY = 2
 const HOST_SESSION_SAME_HANDLE_END_REUSE_LIMIT = 2
 const TERMINAL_CREATE_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000, 15_000, 30_000] as const
-const AGENT_SESSION_REPLAY_UPDATE_REQUIRED_MESSAGE =
-  'Remote agent recovery requires the same updated Orca server that accepted the launch. Update the workspace host and try again; no fallback launch was attempted.'
 
 type HostHandleReplacementPolicy = 'reuse' | 'prefer-replacement' | 'require-replacement'
 
@@ -279,7 +265,8 @@ export function createRemoteRuntimePtyTransport(
   })
   let lastRecoveryStateKey = ''
   let pendingViewportClaim = false
-  let pendingClaimInput = ''
+  let pendingClaimInput: { text: string; queryReply: boolean }[] = []
+  let pendingClaimQueryReplyCount = 0
   let terminalCreateRetryWait: {
     timer: ReturnType<typeof setTimeout>
     resolve: (continueRetrying: boolean) => void
@@ -359,9 +346,48 @@ export function createRemoteRuntimePtyTransport(
   const viewportClaimReadyWaiters = new Set<(ready: boolean) => void>()
   const clearPendingViewportClaim = (): void => {
     pendingViewportClaim = false
-    pendingClaimInput = ''
+    pendingClaimInput = []
+    pendingClaimQueryReplyCount = 0
     for (const resolve of viewportClaimReadyWaiters) {
       resolve(false)
+    }
+    viewportClaimReadyWaiters.clear()
+  }
+  const queuePendingClaimInput = (text: string, queryReply: boolean): void => {
+    if (queryReply && pendingClaimQueryReplyCount >= REMOTE_RUNTIME_MAX_PENDING_QUERY_REPLIES) {
+      const oldestReply = pendingClaimInput.findIndex((segment) => segment.queryReply)
+      if (oldestReply !== -1) {
+        pendingClaimInput.splice(oldestReply, 1)
+        pendingClaimQueryReplyCount -= 1
+        const left = pendingClaimInput[oldestReply - 1]
+        const right = pendingClaimInput[oldestReply]
+        if (left && right && !left.queryReply && !right.queryReply) {
+          left.text += right.text
+          pendingClaimInput.splice(oldestReply, 1)
+        }
+      }
+    }
+    const tail = pendingClaimInput.at(-1)
+    if (!queryReply && tail && !tail.queryReply) {
+      tail.text += text
+      return
+    }
+    pendingClaimInput.push({ text, queryReply })
+    if (queryReply) {
+      pendingClaimQueryReplyCount += 1
+    }
+  }
+  // Why: clearing the claim flag without draining strands the queued bytes.
+  const flushPendingClaimInput = (stream: RemoteRuntimeMultiplexedTerminal): void => {
+    const queued = pendingClaimInput
+    pendingViewportClaim = false
+    pendingClaimInput = []
+    pendingClaimQueryReplyCount = 0
+    for (const segment of queued) {
+      stream.sendInput(segment.text)
+    }
+    for (const resolve of viewportClaimReadyWaiters) {
+      resolve(true)
     }
     viewportClaimReadyWaiters.clear()
   }
@@ -371,7 +397,6 @@ export function createRemoteRuntimePtyTransport(
   // Why: reconnect retries must replay one host operation instead of creating
   // another fresh agent when the first response was lost.
   const agentCreateOperation = createAgentSessionCreateOperation()
-  let agentSessionCreateAuthority: LiveRuntimeEnvironmentAuthority | null = null
   const outputProcessor = createPtyOutputProcessor({
     onTitleChange,
     onBell,
@@ -866,16 +891,14 @@ export function createRemoteRuntimePtyTransport(
     environmentId: string,
     method: string,
     params?: unknown,
-    timeoutMs = 15_000,
-    expectedRuntimeId?: string
+    timeoutMs = 15_000
   ): Promise<TResult> {
     const response = await window.api.runtimeEnvironments.call({
       selector: environmentId,
       method,
       params,
       timeoutMs,
-      expectedEnvironmentPairingRevision: runtimeEnvironmentPairingRevision,
-      ...(expectedRuntimeId ? { expectedRuntimeId } : {})
+      expectedEnvironmentPairingRevision: runtimeEnvironmentPairingRevision
     })
     return unwrapRuntimeRpcResult(response as RuntimeRpcResponse<TResult>)
   }
@@ -924,8 +947,7 @@ export function createRemoteRuntimePtyTransport(
       reconcileExisting: boolean
     ) => Promise<RemoteAgentSessionLaunchResult>,
     environmentId: string,
-    expectedLifecycleEpoch: number,
-    beforeReplay?: (timeoutMs: number) => Promise<void>
+    expectedLifecycleEpoch: number
   ): Promise<RemoteAgentSessionLaunchResult | null> {
     let retryAttempt = 0
     // Structured operations already carry their replay proof; ordinary terminal.create
@@ -1010,9 +1032,6 @@ export function createRemoteRuntimePtyTransport(
         break
       }
       try {
-        if (reconcileExisting) {
-          await beforeReplay?.(Math.min(5_000, createRemainingMs ?? 5_000))
-        }
         return await invoke(Math.min(15_000, createRemainingMs ?? 15_000), reconcileExisting)
       } catch (error) {
         lastError = error
@@ -1277,20 +1296,20 @@ export function createRemoteRuntimePtyTransport(
     }
   }
 
-  const inputBatcher = createRemoteRuntimePtyTextBatcher(REMOTE_TERMINAL_INPUT_FLUSH_MS, (text) => {
+  const sendUnacknowledgedInput = (text: string, queryReply = false): boolean => {
     const targetHandle = handle
     const targetLifecycleEpoch = lifecycleEpoch
     if (!connected || !targetHandle || recoveryBlocksIo()) {
-      return
+      return false
     }
     const stream = getCurrentMultiplexedStream(targetHandle)
     if (stream?.sendInput(text)) {
-      return
+      return true
     }
     if (pendingViewportClaim) {
       // Why: a claim during subscribe/reconnect has no stream record yet; hold its input so the stream emits claim+input in one order.
-      pendingClaimInput += text
-      return
+      queuePendingClaimInput(text, queryReply)
+      return true
     }
     void callRuntime<{ send: RuntimeTerminalSend }>('terminal.send', {
       terminal: targetHandle,
@@ -1318,7 +1337,13 @@ export function createRemoteRuntimePtyTransport(
           handleRemoteTerminalError(error)
         }
       })
-  })
+    return true
+  }
+
+  const inputBatcher = createRemoteRuntimePtyTextBatcher(
+    REMOTE_TERMINAL_INPUT_FLUSH_MS,
+    sendUnacknowledgedInput
+  )
 
   function sendViewportUpdate(cols: number, rows: number, claim = false): void {
     const targetHandle = handle
@@ -1327,8 +1352,8 @@ export function createRemoteRuntimePtyTransport(
     }
     const stream = getCurrentMultiplexedStream(targetHandle)
     if (claim ? stream?.claimViewport(cols, rows) : stream?.resize(cols, rows)) {
-      if (claim) {
-        pendingViewportClaim = false
+      if (claim && stream) {
+        flushPendingClaimInput(stream)
       }
       return
     }
@@ -1798,6 +1823,12 @@ export function createRemoteRuntimePtyTransport(
                     kittyKeyboardFlags: meta.kittyKeyboardFlags,
                     snapshotSeq: meta.seq
                   }
+                : {}),
+              ...(meta?.terminalOwner && meta.seq !== undefined
+                ? { terminalOwner: meta.terminalOwner }
+                : {}),
+              ...(meta?.alternateScreen !== undefined && meta.seq !== undefined
+                ? { alternateScreen: meta.alternateScreen }
                 : {})
             })
           }
@@ -1942,16 +1973,6 @@ export function createRemoteRuntimePtyTransport(
     // Why: a viewport change during the subscribe round-trip hit the no-op one-shot fallback; replay the latest viewport so the PTY isn't stuck at subscribe-time size.
     if (pendingViewportClaim && desiredViewport) {
       nextStream.claimViewport(desiredViewport.cols, desiredViewport.rows)
-      pendingViewportClaim = false
-      const queuedInput = pendingClaimInput
-      pendingClaimInput = ''
-      if (queuedInput) {
-        nextStream.sendInput(queuedInput)
-      }
-      for (const resolve of viewportClaimReadyWaiters) {
-        resolve(true)
-      }
-      viewportClaimReadyWaiters.clear()
     } else if (
       desiredViewport &&
       (desiredViewport.cols !== subscribedViewport?.cols ||
@@ -1959,6 +1980,8 @@ export function createRemoteRuntimePtyTransport(
     ) {
       nextStream.resize(desiredViewport.cols, desiredViewport.rows)
     }
+    // Why: a live claim may already have cleared the flag, so drain on every install.
+    flushPendingClaimInput(nextStream)
   }
 
   const transport: PtyTransport = {
@@ -1995,10 +2018,8 @@ export function createRemoteRuntimePtyTransport(
         const commandToSend = options.command ?? command
         const startupCommandDeliveryToSend =
           options.startupCommandDelivery ?? startupCommandDelivery
-        const envToSend = withLegacyTerminalAttributionDisabledEnv(options.env ?? env)
-        const envToDeleteToSend = addLegacyTerminalAttributionDisableRequest(
-          options.envToDelete ?? envToDelete
-        )
+        const envToSend = options.env ?? env
+        const envToDeleteToSend = options.envToDelete ?? envToDelete
         const launchConfigToSend = options.launchConfig ?? launchConfig
         const resumeProviderSessionToSend = options.resumeProviderSession ?? resumeProviderSession
         const launchTokenToSend = options.launchToken ?? launchToken
@@ -2026,7 +2047,7 @@ export function createRemoteRuntimePtyTransport(
           presentation: 'background' as const,
           ...(activate === true ? { activate: true } : {})
         }
-        const legacyCreate = ({ authority }: { authority: LiveRuntimeEnvironmentAuthority }) =>
+        const legacyCreate = () =>
           createWithUnknownOutcomeRecovery(
             'terminal',
             (timeoutMs, reconcileExisting) =>
@@ -2037,49 +2058,13 @@ export function createRemoteRuntimePtyTransport(
                   ...legacyCreateParams,
                   ...(reconcileExisting ? { reconcileExisting: true } : {})
                 },
-                timeoutMs,
-                authority.runtimeId
+                timeoutMs
               ),
             createEnvironmentId,
             connectLifecycleEpoch
           )
-        const requiredAgentSessionCapabilities: readonly RuntimeCapability[] =
-          resumeProviderSessionToSend && launchAgentToSend === 'omp'
-            ? [AGENT_SESSION_OMP_RESUME_PATH_RUNTIME_CAPABILITY]
-            : []
-        const revalidateAgentSessionReplay = async (
-          timeoutMs: number,
-          authority: LiveRuntimeEnvironmentAuthority
-        ): Promise<void> => {
-          const status = await callRuntimeForEnvironment<RuntimeStatus>(
-            createEnvironmentId,
-            'status.get',
-            undefined,
-            timeoutMs,
-            authority.runtimeId
-          )
-          const requiredCapabilities = [
-            AGENT_SESSION_HOST_AUTHORITY_RUNTIME_CAPABILITY,
-            TERMINAL_ATTRIBUTION_REMOVED_RUNTIME_CAPABILITY,
-            ...requiredAgentSessionCapabilities
-          ]
-          const capabilities = Array.isArray(status.capabilities) ? status.capabilities : []
-          if (
-            status.runtimeId !== authority.runtimeId ||
-            requiredCapabilities.some((capability) => !capabilities.includes(capability))
-          ) {
-            throw new Error(AGENT_SESSION_REPLAY_UPDATE_REQUIRED_MESSAGE)
-          }
-        }
-        const hostAuthorityCreate = (authority: LiveRuntimeEnvironmentAuthority) => {
-          if (
-            agentSessionCreateAuthority &&
-            agentSessionCreateAuthority.runtimeId !== authority.runtimeId
-          ) {
-            throw new Error(AGENT_SESSION_REPLAY_UPDATE_REQUIRED_MESSAGE)
-          }
-          agentSessionCreateAuthority ??= authority
-          return createWithUnknownOutcomeRecovery(
+        const hostAuthorityCreate = () =>
+          createWithUnknownOutcomeRecovery(
             'agent-session',
             (timeoutMs) =>
               resumeProviderSessionToSend
@@ -2101,8 +2086,7 @@ export function createRemoteRuntimePtyTransport(
                       placement: { tabId, leafId },
                       presentation: 'background'
                     },
-                    timeoutMs,
-                    authority.runtimeId
+                    timeoutMs
                   )
                 : callRuntimeForEnvironment<RuntimeCreateAgentSessionResult>(
                     createEnvironmentId,
@@ -2124,37 +2108,26 @@ export function createRemoteRuntimePtyTransport(
                       },
                       agentCreateOperation.clientOperationId
                     ),
-                    timeoutMs,
-                    authority.runtimeId
+                    timeoutMs
                   ),
             createEnvironmentId,
-            connectLifecycleEpoch,
-            (timeoutMs) => revalidateAgentSessionReplay(timeoutMs, authority)
+            connectLifecycleEpoch
           )
-        }
+        const resumeHostAuthorityCapability = resumeProviderSessionToSend
+          ? agentResumeHostAuthorityCapability(launchAgentToSend)
+          : undefined
         const created = launchAgentToSend
           ? agentSessionRequiresHostAuthorityReplay
-            ? agentSessionCreateAuthority
-              ? await hostAuthorityCreate(agentSessionCreateAuthority)
-              : await runRemoteAgentSessionLaunch<RemoteAgentSessionLaunchResult | null>({
-                  environmentId: createEnvironmentId,
-                  expectedEnvironmentPairingRevision: runtimeEnvironmentPairingRevision,
-                  hostAuthority: hostAuthorityCreate,
-                  requiredHostAuthorityCapabilities: requiredAgentSessionCapabilities,
-                  legacy: legacyCreate
-                })
+            ? await hostAuthorityCreate()
             : await runRemoteAgentSessionLaunch<RemoteAgentSessionLaunchResult | null>({
                 environmentId: createEnvironmentId,
-                expectedEnvironmentPairingRevision: runtimeEnvironmentPairingRevision,
                 hostAuthority: hostAuthorityCreate,
-                requiredHostAuthorityCapabilities: requiredAgentSessionCapabilities,
+                ...(resumeHostAuthorityCapability
+                  ? { hostAuthorityCapability: resumeHostAuthorityCapability }
+                  : {}),
                 legacy: legacyCreate
               })
-          : await runRemoteAgentSessionLaunch<RemoteAgentSessionLaunchResult | null>({
-              environmentId: createEnvironmentId,
-              expectedEnvironmentPairingRevision: runtimeEnvironmentPairingRevision,
-              legacy: legacyCreate
-            })
+          : await legacyCreate()
         if (!created) {
           if (!destroyed && lifecycleEpoch === connectLifecycleEpoch) {
             connecting = false
@@ -2230,21 +2203,13 @@ export function createRemoteRuntimePtyTransport(
         if (!destroyed && lifecycleEpoch === connectLifecycleEpoch) {
           connecting = false
           const message = runtimeTerminalErrorMessage(error)
-          const recoverable = isRecoverableRemoteRuntimeConnectionError(
-            toRemoteRuntimeClientErrorLike(error)
-          )
           if (isRemoteTerminalGoneMessage(message)) {
             recovery.cancel()
             handleRemoteTerminalError(error)
           } else if (
-            recoverable ||
-            terminalCreateNeedsReconciliation ||
-            agentSessionRequiresHostAuthorityReplay
+            isRecoverableRemoteRuntimeConnectionError(toRemoteRuntimeClientErrorLike(error))
           ) {
             recovery.markDisconnected()
-            if (!recoverable) {
-              surfaceErrorMessage(message)
-            }
           } else {
             recovery.cancel()
             emitRecoveryState()
@@ -2426,39 +2391,37 @@ export function createRemoteRuntimePtyTransport(
     // Why: query replies (CPR/DSR/DA/OSC) are read in raw mode with a short timeout; the 8ms debounce would miss it and echo the reply onto the prompt (#7329).
     sendInputImmediate(data: string): boolean {
       const targetHandle = handle
+      const targetLifecycleEpoch = lifecycleEpoch
       if (!connected || !targetHandle || recoveryBlocksIo()) {
         return false
       }
       if (!data) {
         return true
       }
-      // Why: earlier input may still be in async byte-length validation (in validationTail, not takePending); route the reply through the ordered queue so it can't jump ahead and reorder bytes.
+      // Why: wait behind async validation, but keep the reply as its own host-classifiable write.
       if (inputBatcher.hasPendingValidation()) {
-        const accepted = inputBatcher.push(data)
-        inputBatcher.flush()
-        return accepted
+        inputBatcher.enqueueAfterValidation(() => {
+          if (
+            !connected ||
+            lifecycleEpoch !== targetLifecycleEpoch ||
+            handle !== targetHandle ||
+            recoveryBlocksIo()
+          ) {
+            return
+          }
+          const pending = inputBatcher.takePending()
+          if (pending) {
+            sendUnacknowledgedInput(pending)
+          }
+          sendUnacknowledgedInput(data, true)
+        })
+        return true
       }
       const pending = inputBatcher.takePending()
-      const text = `${pending}${data}`
-      const stream = getCurrentMultiplexedStream(targetHandle)
-      if (stream?.sendInput(text)) {
-        return true
+      if (pending && !sendUnacknowledgedInput(pending)) {
+        return false
       }
-      if (pendingViewportClaim) {
-        pendingClaimInput += text
-        return true
-      }
-      void callRuntime('terminal.send', {
-        terminal: targetHandle,
-        text,
-        client: { id: clientId, type: 'desktop' },
-        ...(desiredViewport ? { viewport: desiredViewport, claimViewport: true as const } : {})
-      }).catch((error) => {
-        if (handle === targetHandle) {
-          handleRemoteTerminalError(error)
-        }
-      })
-      return true
+      return sendUnacknowledgedInput(data, true)
     },
 
     sendInputAccepted: sendInputAcceptedToRuntime,

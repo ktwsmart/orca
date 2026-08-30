@@ -1,9 +1,9 @@
 import { useAppStore } from '@/store'
+import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
 import type {
   LaunchAgentBackgroundSessionArgs,
   LaunchAgentBackgroundSessionResult
 } from '@/lib/agent-background-session-contract'
-import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
 import { tuiAgentToAgentKind } from '@/lib/telemetry'
 import { scheduleAgentBackgroundDraft } from '@/lib/agent-background-draft-delivery'
 import { requestBackgroundTerminalWorktreeMount } from '@/components/terminal/background-terminal-worktree-mount'
@@ -11,7 +11,7 @@ import {
   resolveTuiAgentLaunchArgs,
   resolveTuiAgentLaunchEnv
 } from '../../../shared/tui-agent-launch-defaults'
-import { TUI_AGENT_CONFIG } from '../../../shared/tui-agent-config'
+import { requireTuiAgentConfig } from '../../../shared/require-tui-agent-config'
 import { resolveAgentBackgroundLaunchHost } from '@/lib/agent-background-session-launch-host'
 import { makePaneKey } from '../../../shared/stable-pane-id'
 import {
@@ -52,7 +52,7 @@ export async function launchAgentBackgroundSession(
     throw new Error('The target workspace is no longer available.')
   }
   const cmdOverrides = store.settings?.agentCmdOverrides ?? {}
-  const defaultAgentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
+  const agentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
   const agentEnv = resolveTuiAgentLaunchEnv(agent, store.settings?.agentDefaultEnv)
   // Folder launch ownership cannot be derived from a repo row (#2989).
   const launchHost = resolveAgentBackgroundLaunchHost({
@@ -61,10 +61,7 @@ export async function launchAgentBackgroundSession(
     worktreePath: worktree.path,
     repo
   })
-  const runtimeTarget = getActiveRuntimeTarget(
-    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
-  )
-  const preflight = TUI_AGENT_CONFIG[agent].preflightTrust
+  const preflight = requireTuiAgentConfig(agent).preflightTrust
   if (preflight && worktree.path && window.api.agentTrust?.markTrusted) {
     try {
       await window.api.agentTrust.markTrusted({
@@ -76,11 +73,15 @@ export async function launchAgentBackgroundSession(
       // Best-effort: the user can still accept the trust prompt.
     }
   }
+  // Route by the worktree's owner host, not the focused runtime.
+  const runtimeTarget = getActiveRuntimeTarget(
+    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
+  )
   const startup = buildAutomationBackgroundStartup({
     agent,
     prompt,
     cmdOverrides,
-    agentArgs: defaultAgentArgs,
+    agentArgs,
     agentEnv,
     launchHost,
     runtimeKind: runtimeTarget.kind,
@@ -114,10 +115,11 @@ export async function launchAgentBackgroundSession(
       }),
     write: (ptyId, data) => window.api.pty.write(ptyId, data)
   })
-  // Route by the worktree's owner host, not the focused runtime.
   let ptyId = '',
     runtimeTerminalHandle: string | null = null
-  let returnedLaunchConfig: typeof startupPlan.launchConfig | undefined
+  // What the local spawn answered and later steps still need: which lifetime of `ptyId` this launch
+  // owns, and the config the host actually launched. Both absent for a runtime terminal.
+  let spawned: { incarnationId?: string; launchConfig?: typeof startupPlan.launchConfig } = {}
   let tab: ReturnType<typeof store.createTab> | null = null
   let exitHandled = false,
     eagerPtyBuffer: EagerPtyHandle | null = null
@@ -211,7 +213,7 @@ export async function launchAgentBackgroundSession(
         }
       })
       ptyId = result.id
-      returnedLaunchConfig = result.launchConfig
+      spawned = result
     }
     const adopted = await adoptAgentBackgroundSessionTab({
       store,
@@ -219,7 +221,7 @@ export async function launchAgentBackgroundSession(
       reservedTabId,
       ptyId,
       paneKey,
-      launchConfig: returnedLaunchConfig ?? startupPlan.launchConfig,
+      launchConfig: spawned.launchConfig ?? startupPlan.launchConfig,
       launchRegistration,
       runtimeTarget,
       runtimeTerminalHandle,
@@ -241,9 +243,10 @@ export async function launchAgentBackgroundSession(
       // hidden prompt launches so sidebar/activity surfaces do not stay idle.
       const routing = agentStatusConsumer.resolveRouting()
       if (routing) {
+        const observation = agentStatusConsumer.observeLaunchIngress()
         store.setAgentStatus(
           paneKey,
-          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent },
+          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent, observation },
           undefined,
           undefined,
           routing,
@@ -271,7 +274,9 @@ export async function launchAgentBackgroundSession(
         .then((result) => handleExit(ptyId, result.wait.exitCode ?? 0))
         .catch(() => {})
     } else {
-      eagerPtyBuffer = registerEagerPtyBuffer(ptyId, handleExit)
+      // Why the incarnation: a relay-recycled id can hold the previous owner's exit, and draining
+      // that into this handler tears the agent session down seconds after it launched.
+      eagerPtyBuffer = registerEagerPtyBuffer(ptyId, handleExit, spawned.incarnationId)
       unsubscribeData = subscribeToPtyData(ptyId, handleData)
       // Why: opening the workspace attaches a real terminal transport and disposes
       // the eager exit handler. This sidecar keeps automation completion tracking

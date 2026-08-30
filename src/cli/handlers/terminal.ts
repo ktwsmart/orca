@@ -8,8 +8,7 @@ import type {
   RuntimeTerminalSend,
   RuntimeTerminalShow,
   RuntimeTerminalSplit,
-  RuntimeTerminalWait,
-  RuntimeStatus
+  RuntimeTerminalWait
 } from '../../shared/runtime-types'
 import type { CommandHandler } from '../dispatch'
 import { shouldUseRendererBackedInteractiveTerminal } from '../codex-command-classification'
@@ -38,14 +37,6 @@ import {
   getRequiredWorktreeSelector,
   getTerminalHandle
 } from '../selectors'
-import {
-  addLegacyTerminalAttributionDisableRequest,
-  hostSupportsTerminalCreateAttributionDisable,
-  hostSupportsTerminalSplitAttributionDisable,
-  TERMINAL_CREATE_ATTRIBUTION_UPDATE_REQUIRED_MESSAGE,
-  TERMINAL_SPLIT_ATTRIBUTION_UPDATE_REQUIRED_MESSAGE,
-  withLegacyTerminalAttributionDisabledEnv
-} from '../../shared/legacy-terminal-attribution-env'
 
 // Why: terminal wait legitimately needs to outlive the CLI's default RPC
 // timeout. Even without an explicit server timeout, the client must allow
@@ -85,22 +76,48 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
     if (cursorFlag !== undefined && cursor === undefined) {
       throw new RuntimeClientError('invalid_argument', '--cursor must be a non-negative integer')
     }
+    const screen = flags.get('screen') === true
+    // Why: a cursor pages through accumulated output. A screen read is the current frame and has
+    // nothing behind it to page, so accepting both would imply history that is not there.
+    if (screen && cursorFlag !== undefined) {
+      throw new RuntimeClientError(
+        'invalid_argument',
+        '--screen reads the current rendered screen, which has no cursor to page from. Use --cursor without --screen to page through accumulated output.'
+      )
+    }
     const result = await client.call<{ terminal: RuntimeTerminalRead }>('terminal.read', {
       terminal: await getTerminalHandle(flags, cwd, client),
       ...(cursor !== undefined ? { cursor } : {}),
+      ...(screen ? { screen: true } : {}),
       limit: getOptionalPositiveIntegerFlag(flags, 'limit')
     })
+    // Why: an older host drops the unknown `screen` param and answers with its ordinary stream
+    // read, which carries no source. Returning that silently is the exact failure this flag
+    // exists to prevent, so refuse rather than hand back the other question's answer.
+    if (screen && result.result.terminal.source === undefined) {
+      throw new RuntimeClientError(
+        'incompatible_runtime',
+        'This Orca host does not support --screen reads, so it answered with accumulated output instead of the rendered screen. Update Orca on the host, or drop --screen to read accumulated output deliberately.'
+      )
+    }
     printResult(result, json, formatTerminalRead)
   },
   'terminal send': async ({ flags, client, cwd, json }) => {
+    const text = getOptionalStringFlag(flags, 'text')
+    const enter = flags.get('enter') === true
+    const interrupt = flags.get('interrupt') === true
     const result = await client.call<{ send: RuntimeTerminalSend }>('terminal.send', {
       terminal: await getTerminalHandle(flags, cwd, client),
-      text: getOptionalStringFlag(flags, 'text'),
-      enter: flags.get('enter') === true,
-      interrupt: flags.get('interrupt') === true,
+      text,
+      enter,
+      interrupt,
+      ...(text && enter && !interrupt ? { agentPrompt: true } : {}),
       client: { id: 'orca-cli', type: 'desktop' }
     })
     printResult(result, json, formatTerminalSend)
+    if (!result.result.send.accepted) {
+      process.exitCode = 1
+    }
   },
   'terminal wait': async ({ flags, client, cwd, json }) => {
     const timeoutMs = getOptionalPositiveIntegerFlag(flags, 'timeout-ms')
@@ -146,30 +163,17 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
     const useRendererBackedInteractiveTerminal =
       !client.isRemote && shouldUseRendererBackedInteractiveTerminal(command)
     const focus = flags.get('focus') === true
-    const status = await client.call<RuntimeStatus>('status.get')
-    if (!hostSupportsTerminalCreateAttributionDisable(status.result)) {
-      throw new RuntimeClientError(
-        'runtime_update_required',
-        TERMINAL_CREATE_ATTRIBUTION_UPDATE_REQUIRED_MESSAGE
-      )
-    }
-    const result = await client.call<{ terminal: RuntimeTerminalCreate }>(
-      'terminal.create',
-      {
-        worktree: await getBrowserWorktreeSelector(flags, cwd, client),
-        command,
-        env: withLegacyTerminalAttributionDisabledEnv(undefined),
-        envToDelete: addLegacyTerminalAttributionDisableRequest(undefined),
-        title: getOptionalStringFlag(flags, 'title'),
-        // Why: interactive local agent TUIs need the renderer-backed terminal
-        // path for browser-side features, but CLI creates must stay backgrounded
-        // unless the caller explicitly asks for focus.
-        focus,
-        ...(focus ? { presentation: 'focused' } : {}),
-        ...(useRendererBackedInteractiveTerminal ? { rendererBacked: true, activate: focus } : {})
-      },
-      { expectedRuntimeId: status.result.runtimeId }
-    )
+    const result = await client.call<{ terminal: RuntimeTerminalCreate }>('terminal.create', {
+      worktree: await getBrowserWorktreeSelector(flags, cwd, client),
+      command,
+      title: getOptionalStringFlag(flags, 'title'),
+      // Why: interactive local agent TUIs need the renderer-backed terminal
+      // path for browser-side features, but CLI creates must stay backgrounded
+      // unless the caller explicitly asks for focus.
+      focus,
+      ...(focus ? { presentation: 'focused' } : {}),
+      ...(useRendererBackedInteractiveTerminal ? { rendererBacked: true, activate: focus } : {})
+    })
     printResult(result, json, formatTerminalCreate)
   },
   // `focus` resolves to this canonical path via CommandSpec.aliases before dispatch.
@@ -190,24 +194,11 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
     ) {
       throw new RuntimeClientError('invalid_argument', '--direction must be horizontal or vertical')
     }
-    const status = await client.call<RuntimeStatus>('status.get')
-    if (!hostSupportsTerminalSplitAttributionDisable(status.result)) {
-      throw new RuntimeClientError(
-        'runtime_update_required',
-        TERMINAL_SPLIT_ATTRIBUTION_UPDATE_REQUIRED_MESSAGE
-      )
-    }
-    const result = await client.call<{ split: RuntimeTerminalSplit }>(
-      'terminal.split',
-      {
-        terminal: await getTerminalHandle(flags, cwd, client),
-        direction: directionFlag,
-        command: getOptionalStringFlag(flags, 'command'),
-        env: withLegacyTerminalAttributionDisabledEnv(undefined),
-        envToDelete: addLegacyTerminalAttributionDisableRequest(undefined)
-      },
-      { expectedRuntimeId: status.result.runtimeId }
-    )
+    const result = await client.call<{ split: RuntimeTerminalSplit }>('terminal.split', {
+      terminal: await getTerminalHandle(flags, cwd, client),
+      direction: directionFlag,
+      command: getOptionalStringFlag(flags, 'command')
+    })
     printResult(result, json, formatTerminalSplit)
   }
 }

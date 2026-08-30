@@ -5,6 +5,8 @@ import { printHelp } from '../help'
 import { COMMAND_SPECS } from '../specs'
 import { TERMINAL_HANDLERS } from './terminal'
 
+const ORIGINAL_EXIT_CODE = process.exitCode
+
 describe('terminal close CLI', () => {
   afterEach(() => {
     vi.restoreAllMocks()
@@ -62,66 +64,115 @@ describe('terminal close CLI', () => {
   })
 })
 
-describe('terminal split CLI', () => {
+describe('terminal send CLI', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    process.exitCode = ORIGINAL_EXIT_CODE
   })
 
-  it('sends the old-host attribution bypass through the legacy-compatible env field', async () => {
-    const call = vi.fn(async (method: string) =>
-      method === 'status.get'
-        ? {
-            result: {
-              runtimeId: 'runtime-1',
-              capabilities: ['terminal.attribution-removed.v1']
-            }
-          }
-        : { result: { split: { handle: 'term-2', parentHandle: 'term-1' } } }
-    )
+  it('marks combined text and Enter as an agent prompt candidate', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: { send: { handle: 'term-1', accepted: true, bytesWritten: 7 } }
+    })
     vi.spyOn(console, 'log').mockImplementation(() => {})
 
-    await TERMINAL_HANDLERS['terminal split']({
-      flags: new Map([
+    await TERMINAL_HANDLERS['terminal send']({
+      flags: new Map<string, string | true>([
         ['terminal', 'term-1'],
-        ['direction', 'horizontal']
+        ['text', 'review'],
+        ['enter', true]
       ]),
       client: { call } as unknown as RuntimeClient,
       cwd: '/tmp/worktree',
       json: true
     })
 
-    expect(call).toHaveBeenNthCalledWith(1, 'status.get')
-    expect(call).toHaveBeenNthCalledWith(
-      2,
-      'terminal.split',
-      {
-        terminal: 'term-1',
-        direction: 'horizontal',
-        command: undefined,
-        env: { ORCA_ATTRIBUTION_BYPASS: '1' },
-        envToDelete: ['ORCA_ENABLE_GIT_ATTRIBUTION']
-      },
-      { expectedRuntimeId: 'runtime-1' }
-    )
+    expect(call).toHaveBeenCalledWith('terminal.send', {
+      terminal: 'term-1',
+      text: 'review',
+      enter: true,
+      interrupt: false,
+      agentPrompt: true,
+      client: { id: 'orca-cli', type: 'desktop' }
+    })
   })
 
-  it('refuses legacy hosts because renderer-owned splits discard environment fields', async () => {
+  it('explains that Structured Chat blocked a refused send and how to recover', async () => {
     const call = vi.fn().mockResolvedValue({
-      result: { appVersion: '1.4.181', capabilities: ['mobile.tasks.v1'] }
+      result: {
+        send: {
+          handle: 'term-1',
+          accepted: false,
+          bytesWritten: 0,
+          agentSessionRefusal: {
+            code: 'agent_session_conflict',
+            sessionId: 'session-1',
+            ownerRuntimeKind: 'native',
+            handoffStage: null,
+            ownerPid: 4242,
+            runtimeFence: 7
+          }
+        }
+      }
+    })
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    process.exitCode = undefined
+
+    await TERMINAL_HANDLERS['terminal send']({
+      flags: new Map<string, string | true>([
+        ['terminal', 'term-1'],
+        ['text', 'review'],
+        ['enter', true]
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp/worktree',
+      json: false
     })
 
-    await expect(
-      TERMINAL_HANDLERS['terminal split']({
-        flags: new Map([['terminal', 'term-1']]),
-        client: { call } as unknown as RuntimeClient,
-        cwd: '/tmp/worktree',
-        json: true
-      })
-    ).rejects.toMatchObject({
-      code: 'runtime_update_required',
-      message: expect.stringContaining('Update the host and try again')
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringMatching(/Structured Chat.*Switch it to Terminal.*orca terminal send/s)
+    )
+    expect(process.exitCode).toBe(1)
+  })
+
+  it('keeps text-only and bare Enter sends as direct terminal input', async () => {
+    const call = vi.fn().mockResolvedValue({
+      result: { send: { handle: 'term-1', accepted: true, bytesWritten: 1 } }
     })
-    expect(call).toHaveBeenCalledTimes(1)
-    expect(call).not.toHaveBeenCalledWith('terminal.split', expect.anything())
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    await TERMINAL_HANDLERS['terminal send']({
+      flags: new Map<string, string | true>([
+        ['terminal', 'term-1'],
+        ['text', 'x']
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp/worktree',
+      json: true
+    })
+    await TERMINAL_HANDLERS['terminal send']({
+      flags: new Map<string, string | true>([
+        ['terminal', 'term-1'],
+        ['enter', true]
+      ]),
+      client: { call } as unknown as RuntimeClient,
+      cwd: '/tmp/worktree',
+      json: true
+    })
+
+    expect(call).toHaveBeenNthCalledWith(1, 'terminal.send', {
+      terminal: 'term-1',
+      text: 'x',
+      enter: false,
+      interrupt: false,
+      client: { id: 'orca-cli', type: 'desktop' }
+    })
+    expect(call).toHaveBeenNthCalledWith(2, 'terminal.send', {
+      terminal: 'term-1',
+      text: undefined,
+      enter: true,
+      interrupt: false,
+      client: { id: 'orca-cli', type: 'desktop' }
+    })
   })
 })
