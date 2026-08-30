@@ -1,32 +1,36 @@
 import { useAppStore } from '@/store'
-import { buildAgentStartupPlan } from '@/lib/tui-agent-startup'
-import {
-  applyAutomationOneShotStartup,
-  resolveAutomationOneShotContext,
-  type LaunchAgentBackgroundSessionArgs,
-  type LaunchAgentBackgroundSessionResult
+import type {
+  LaunchAgentBackgroundSessionArgs,
+  LaunchAgentBackgroundSessionResult
 } from '@/lib/agent-background-session-contract'
+import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
 import { tuiAgentToAgentKind } from '@/lib/telemetry'
 import { scheduleAgentBackgroundDraft } from '@/lib/agent-background-draft-delivery'
 import { requestBackgroundTerminalWorktreeMount } from '@/components/terminal/background-terminal-worktree-mount'
-// oxfmt-ignore
-import { resolveTuiAgentLaunchArgs, resolveTuiAgentLaunchEnv } from '../../../shared/tui-agent-launch-defaults'
+import {
+  resolveTuiAgentLaunchArgs,
+  resolveTuiAgentLaunchEnv
+} from '../../../shared/tui-agent-launch-defaults'
 import { TUI_AGENT_CONFIG } from '../../../shared/tui-agent-config'
 import { resolveAgentBackgroundLaunchHost } from '@/lib/agent-background-session-launch-host'
 import { makePaneKey } from '../../../shared/stable-pane-id'
-// oxfmt-ignore
-import { registerEagerPtyBuffer, subscribeToPtyExit, type EagerPtyHandle } from '@/components/terminal-pane/pty-dispatcher'
+import {
+  registerEagerPtyBuffer,
+  subscribeToPtyExit,
+  type EagerPtyHandle
+} from '@/components/terminal-pane/pty-dispatcher'
 import { subscribeToPtyData } from '@/components/terminal-pane/pty-data-sidecar-subscriptions'
 import { callRuntimeRpc, getActiveRuntimeTarget } from '@/runtime/runtime-rpc-client'
 import { getSettingsForWorktreeRuntimeOwner } from '@/lib/worktree-runtime-owner'
 import { retireProvider } from '@/lib/retire-unowned-background-terminal'
 import { createRuntimeAgentBackgroundTerminal } from '@/lib/runtime-agent-background-create'
-// oxfmt-ignore
-import { subscribeToRuntimeTerminalData, toRemoteRuntimePtyId } from '@/runtime/runtime-terminal-stream'
+import {
+  subscribeToRuntimeTerminalData,
+  toRemoteRuntimePtyId
+} from '@/runtime/runtime-terminal-stream'
 import { createSshBackgroundStartupDelivery } from '@/lib/ssh-background-startup-delivery'
 import { shouldUseShellReadyStartupDelivery } from '../../../shared/codex-startup-delivery'
 import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-pane/terminal-side-effect-facts-handler'
-import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
 import { runBestEffortAgentBackgroundCleanups } from '@/lib/agent-background-session-cleanup'
 import type { bindAutomationTerminal } from '@/lib/automation-terminal-ownership'
 import {
@@ -72,36 +76,22 @@ export async function launchAgentBackgroundSession(
       // Best-effort: the user can still accept the trust prompt.
     }
   }
-  const { platform: launchPlatform, isRemote } = launchHost
-  const startupShell = resolveLocalWindowsAgentStartupShell({
-    platform: launchPlatform,
-    isRemote,
-    terminalWindowsShell: store.settings?.terminalWindowsShell
-  })
-  // oxfmt-ignore
-  const oneShot = resolveAutomationOneShotContext(args.oneShot, agent, defaultAgentArgs, launchHost, runtimeTarget.kind, startupShell)
-  const trimmedPrompt = prompt?.trim() ?? ''
-  const hasPrompt = trimmedPrompt.length > 0
-  const isFollowupPath = TUI_AGENT_CONFIG[agent].promptInjectionMode === 'stdin-after-start'
-
-  const pasteDraftAfterLaunch = hasPrompt && isFollowupPath ? trimmedPrompt : null
-  const startupPlan = buildAgentStartupPlan({
+  const startup = buildAutomationBackgroundStartup({
     agent,
-    prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',
+    prompt,
     cmdOverrides,
-    agentArgs: oneShot.agentArgs,
+    agentArgs: defaultAgentArgs,
     agentEnv,
-    platform: launchPlatform,
-    shell: oneShot.shell,
-    promptInjectionModeOverride: oneShot.promptInjectionMode,
-    isRemote,
-    allowEmptyPromptLaunch: !hasPrompt || isFollowupPath
+    launchHost,
+    runtimeKind: runtimeTarget.kind,
+    worktreePath: worktree.path,
+    terminalWindowsShell: store.settings?.terminalWindowsShell,
+    oneShotRequested: args.oneShot
   })
-  if (!startupPlan) {
+  if (!startup) {
     return null
   }
-  // oxfmt-ignore
-  const completionAuthority = applyAutomationOneShotStartup(startupPlan, oneShot.enabled, oneShot.shell)
+  const startupPlan = startup.plan
 
   // A hidden run tab must never be store-visible without its PTY (#2989).
   const { reservedTabId, leafId, launchToken, launchRegistration, paneEnv } =
@@ -179,7 +169,9 @@ export async function launchAgentBackgroundSession(
         tabId: reservedTabId,
         leafId,
         agent,
-        ...(hasPrompt && !isFollowupPath && !oneShot.enabled ? { prompt: trimmedPrompt } : {}),
+        ...(startup.hasPrompt && !startup.isFollowupPath && !startup.oneShot.enabled
+          ? { prompt: startup.trimmedPrompt }
+          : {}),
         ...(startupPlan.sessionOptions ? { sessionOptions: startupPlan.sessionOptions } : {}),
         legacy: {
           command: startupPlan.launchCommand,
@@ -244,14 +236,14 @@ export async function launchAgentBackgroundSession(
     tab = adopted.tab
     paneKey = adopted.paneKey
     terminalOwnership = adopted.terminalOwnership
-    if (agent === 'command-code' && hasPrompt && !isFollowupPath) {
+    if (agent === 'command-code' && startup.hasPrompt && !startup.isFollowupPath) {
       // Why: Command Code does not expose a prompt-start hook; seed working for
       // hidden prompt launches so sidebar/activity surfaces do not stay idle.
       const routing = agentStatusConsumer.resolveRouting()
       if (routing) {
         store.setAgentStatus(
           paneKey,
-          { state: 'working', prompt: trimmedPrompt, agentType: agent },
+          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent },
           undefined,
           undefined,
           routing,
@@ -292,8 +284,8 @@ export async function launchAgentBackgroundSession(
     // can double-spawn, while later tracking can miss user takeover.
     requestBackgroundTerminalWorktreeMount({ worktreeId, tabIds: [tab.id] })
 
-    if (pasteDraftAfterLaunch !== null) {
-      scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
+    if (startup.pasteDraftAfterLaunch !== null) {
+      scheduleAgentBackgroundDraft(tab.id, startup.pasteDraftAfterLaunch, agent)
     }
 
     return {
@@ -302,7 +294,7 @@ export async function launchAgentBackgroundSession(
       ptyId,
       startupPlan,
       terminalOwnership,
-      completionAuthority
+      completionAuthority: startup.completionAuthority
     }
   } catch (error) {
     // Why: terminal creation and stream subscription are separate remote calls.
