@@ -120,19 +120,17 @@ export async function listDetectedGitWorktrees(
     const routingUnchanged =
       getDetectedWorktreeScanCacheKey(repo.id, getLocalProjectWorktreeGitOptions(store, repo)) ===
       cacheKey
-    const fresh =
+    const safeToAuthorize =
       !inFlight.invalidated &&
       routingUnchanged &&
       isLocalWorktreeScanGenerationCurrent(repo.id, inFlight.sideEffectToken.generation)
     // Why: the caller that started this scan may have gone stale. A current
-    // follower must receive the same attested side-effect token so it can seed
-    // authorization and perform the once-per-scan pruning safely.
+    // follower may restore authorization from the same valid result, but it is
+    // not the fresh producer and must never replay metadata/lineage pruning.
     return {
       gitWorktrees,
-      fresh,
-      safeToAuthorize: fresh,
-      ...(fresh ? { sideEffectToken: inFlight.sideEffectToken } : {}),
-      ...(fresh && inFlight.metadataPrune ? { metadataPrune: inFlight.metadataPrune } : {})
+      fresh: false,
+      safeToAuthorize
     }
   }
 
