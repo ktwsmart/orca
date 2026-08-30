@@ -3,7 +3,10 @@ import { getRequiredStringFlag } from '../flags'
 import { printResult } from '../format'
 import { resolveCodexAccount } from '../orchestration-interaction-loop'
 import { RuntimeClientError } from '../runtime-client'
-import type { ClaudeRateLimitAccountsState, CodexRateLimitAccountsState } from '../../shared/types'
+import type {
+  ClaudeRateLimitAccountsState,
+  CodexRateLimitAccountsState
+} from '../../shared/managed-account-types'
 
 type AccountsListSnapshot = {
   claude: ClaudeRateLimitAccountsState

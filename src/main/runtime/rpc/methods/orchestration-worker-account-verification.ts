@@ -45,6 +45,21 @@ export function assertManagedAccountRequestSupported(params: {
   }
 }
 
+export function assertWorkerStartManagedAccountRequest(params: {
+  managedAccount?: unknown
+  terminal?: string
+  agent?: string
+  on?: string
+}): void {
+  // Why: this wrapper keeps the complete pinning gate out of the already dense worker-start RPC.
+  assertManagedAccountRequestSupported({
+    managedAccount: params.managedAccount,
+    terminal: params.terminal,
+    agent: params.agent,
+    on: params.on
+  })
+}
+
 export async function verifyWorkerLaunchAccount(args: {
   runtime: OrcaRuntimeService
   db: OrchestrationDb
@@ -92,4 +107,22 @@ export async function verifyWorkerLaunchAccount(args: {
     effects: args.effects
   })
   throw new Error(verificationError)
+}
+
+export async function verifyRequestedWorkerLaunchAccount(args: {
+  runtime: OrcaRuntimeService
+  db: OrchestrationDb
+  dispatchId: string
+  worktreeId: string
+  terminalHandle: string
+  managedAccountId?: string
+  effects: WorkerEffect[]
+}): Promise<void> {
+  if (!args.managedAccountId) {
+    return
+  }
+  await verifyWorkerLaunchAccount({
+    ...args,
+    managedAccountId: args.managedAccountId
+  })
 }

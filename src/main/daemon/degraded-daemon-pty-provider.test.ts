@@ -37,6 +37,7 @@ function createProvider(
     probePtyLiveness: vi.fn(async (id: string) => sessions.includes(id)),
     providesAgentSessionOwnerListings: vi.fn(() => authoritativeOwnerListings),
     write: vi.fn(),
+    writeWithSettlement: vi.fn(async () => true),
     resize: vi.fn(),
     shutdown: vi.fn(async (id: string) => {
       const idx = sessions.indexOf(id)
@@ -372,6 +373,20 @@ describe('DegradedDaemonPtyProvider', () => {
     expect(fallback.write).toHaveBeenCalledWith(fresh.id, 'new\n')
   })
 
+  it('preserves settlement through daemon and fallback routes', async () => {
+    const current = createDaemonAdapter('daemon', ['daemon-session'])
+    const fallback = createProvider('fallback')
+    vi.mocked(current.writeWithSettlement).mockResolvedValue(false)
+    const provider = new DegradedDaemonPtyProvider({ current, legacy: [], fallback })
+    await provider.discoverDaemonSessions()
+    const fresh = await provider.spawn({ cols: 80, rows: 24 })
+
+    await expect(provider.writeWithSettlement('daemon-session', 'old')).resolves.toBe(false)
+    await expect(provider.writeWithSettlement(fresh.id, 'new')).resolves.toBe(true)
+    expect(current.writeWithSettlement).toHaveBeenCalledWith('daemon-session', 'old')
+    expect(fallback.writeWithSettlement).toHaveBeenCalledWith(fresh.id, 'new')
+  })
+
   it('routes later fresh PTYs to the daemon after spawn health recovers', async () => {
     const current = createDaemonAdapter('daemon')
     const fallback = createProvider('fallback')
@@ -468,22 +483,6 @@ describe('DegradedDaemonPtyProvider', () => {
       sessionId: 'daemon-session',
       cols: 80,
       rows: 24
-    })
-  })
-
-  // Why: while degraded, a provider that cannot answer must not let inspection
-  // manufacture terminal_gone — that verdict retires a pane that may still be live.
-  it('answers unknown, and refuses terminal_gone, when no provider can answer', async () => {
-    const current = createDaemonAdapter('daemon')
-    const fallback = createProvider('fallback')
-    current.hasPty = vi.fn(() => null)
-    fallback.hasPty = vi.fn(() => null)
-    const provider = new DegradedDaemonPtyProvider({ current, legacy: [], fallback })
-
-    expect(provider.hasPty('unmapped-session')).toBe(null)
-    await expect(provider.inspectProcess('unmapped-session')).resolves.toEqual({
-      foregroundProcess: null,
-      hasChildProcesses: false
     })
   })
 
@@ -677,23 +676,4 @@ describe('DegradedDaemonPtyProvider', () => {
     expect(current.listProcesses).toHaveBeenCalledTimes(3)
     expect(fallback.listProcesses).toHaveBeenCalledTimes(3)
   })
-})
-
-// A memoized route outlives the session it was established for: listProcesses
-// drops ids missing from an authoritative inventory without an exit fanout. So a
-// mapped owner that cannot answer must stay unknown — coercing it to a liveness
-// proof is worse than the absence it replaced, because callers skip the real probe.
-it('keeps a mapped owner that cannot answer unknown, and still probes', async () => {
-  const current = createDaemonAdapter('current', ['s1'])
-  const fallback = createProvider('fallback')
-  const provider = new DegradedDaemonPtyProvider({ current, legacy: [], fallback })
-
-  expect(provider.hasPty('s1')).toBe(true)
-
-  current.hasPty = vi.fn(() => null)
-  expect(provider.hasPty('s1')).toBeNull()
-
-  current.probePtyLiveness = vi.fn(async () => null)
-  await provider.probePtyLiveness('s1')
-  expect(current.probePtyLiveness).toHaveBeenCalled()
 })

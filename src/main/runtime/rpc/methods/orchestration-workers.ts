@@ -1,4 +1,4 @@
-import type { TuiAgent } from '../../../../shared/types'
+import type { TuiAgent } from '../../../../shared/tui-agent'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { defineMethod, type RpcMethod } from '../core'
@@ -19,19 +19,34 @@ import {
   persistWorkerSetupWaitOutcome
 } from './orchestration-worker-setup-gate'
 import {
-  assertManagedAccountRequestSupported,
-  verifyWorkerLaunchAccount
+  assertWorkerStartManagedAccountRequest,
+  verifyRequestedWorkerLaunchAccount
 } from './orchestration-worker-account-verification'
 import { failWorkerStartWithReceipt } from './orchestration-worker-start-receipt'
-import { prepareLocalWorkerStart } from './orchestration-worker-start-validation'
+import {
+  assertReusableWorkerTerminal,
+  prepareLocalWorkerStart,
+  resolveWorkerStartReadinessTimeoutOrThrow
+} from './orchestration-worker-start-validation'
+import { resolveDispatchCreator } from './orchestration-dispatch-creator'
+import { resolveOrchestrationCaller } from './orchestration-run-scope'
 
 export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
   defineMethod({
     name: 'orchestration.workerStart',
     params: WorkerStartParams,
-    handler: async (params, { runtime, orchestrationMutation }) => {
+    handler: async (
+      params,
+      { runtime, orchestrationMutation, orchestrationCompatibilityEvidence }
+    ) => {
+      const readinessTimeoutMs = resolveWorkerStartReadinessTimeoutOrThrow(params.timeoutMs)
       const db = runtime.getOrchestrationDb()
-      const coordinatorPane = runtime.getTerminalPaneKey(params.from)
+      // Why: worker-start was the only Run-scoped verb that skipped this, so a
+      // declared --from could name someone else's pane and inherit their depth.
+      const coordinatorPane = resolveOrchestrationCaller(runtime, {
+        callerTerminalHandle: params.from,
+        callerEvidence: orchestrationCompatibilityEvidence
+      })
       const run = coordinatorPane ? db.getCurrentRunForPane(coordinatorPane) : undefined
       if (!run || (params.run && params.run !== run.id)) {
         throw new OrchestrationError(
@@ -47,14 +62,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         )
       }
 
-      // Why: the guard must run before the federated branch — a direct RPC with --on would
-      // otherwise bypass it entirely while the federated path silently ignores managedAccount.
-      assertManagedAccountRequestSupported({
-        managedAccount: params.managedAccount,
-        terminal: params.terminal,
-        agent: params.agent,
-        on: params.on
-      })
+      assertWorkerStartManagedAccountRequest(params)
 
       if (params.on) {
         return startFederatedWorker({
@@ -73,49 +81,38 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
       const { agent, launch } = prepareLocalWorkerStart({ params, createsWorktree, runtime })
 
       const coordinatorTerminal = await runtime.showTerminal(params.from)
-      const coordinatorWorktree = await runtime.showManagedWorktree(
-        `id:${coordinatorTerminal.worktreeId}`
-      )
-      if (createsWorktree) {
+      const creationWorktree = createsWorktree
+        ? await runtime.showManagedWorktree(`id:${coordinatorTerminal.worktreeId}`)
+        : undefined
+      if (creationWorktree) {
         await assertOrchestrationWorktreeCreationSupported({
           runtime,
-          repoSelector: params.repo ?? coordinatorWorktree.repoId,
+          repoSelector: params.repo ?? creationWorktree.repoId,
           existingPlacement: 'current or an exact existing folder workspace'
         })
       }
-      let resolvedWorktree = createsWorktree
+      let resolvedWorktree = creationWorktree
         ? undefined
         : requestedWorktree === 'current'
-          ? coordinatorWorktree
-          : await runtime.showManagedWorktree(requestedWorktree)
-      let explicitTerminal
-      if (params.terminal) {
-        explicitTerminal = await runtime.showTerminal(params.terminal)
-        if (explicitTerminal.worktreeId !== resolvedWorktree?.id) {
-          throw new OrchestrationError(
-            'terminal_worktree_mismatch',
-            `Terminal ${params.terminal} does not belong to worktree ${resolvedWorktree?.id}.`
-          )
-        }
-        if (!(await runtime.isTerminalRunningAgent(params.terminal))) {
-          throw new OrchestrationError(
-            'agent_unconfigured',
-            `Terminal ${params.terminal} is not running a recognized agent.`
-          )
-        }
-      }
+          ? await runtime.showManagedTerminalWorkspace(`id:${coordinatorTerminal.worktreeId}`)
+          : await runtime.showManagedTerminalWorkspace(requestedWorktree)
+      await assertReusableWorkerTerminal({
+        runtime,
+        terminal: params.terminal,
+        resolvedWorktreeId: resolvedWorktree?.id
+      })
 
       const startOptions = {
         worktree: requestedWorktree,
         resolvedWorktreeId: resolvedWorktree?.id ?? null,
         name: params.name ?? null,
-        repo: params.repo ?? (createsWorktree ? coordinatorWorktree.repoId : null),
+        repo: params.repo ?? creationWorktree?.repoId ?? null,
         baseBranch: params.baseBranch ?? null,
         terminal: params.terminal ?? null,
         agent: agent ?? null,
         managedAccount: params.managedAccount ?? null,
         launch: launch.receipt,
-        timeoutMs: params.timeoutMs ?? 60_000,
+        timeoutMs: readinessTimeoutMs,
         setup: createsWorktree ? (params.setup ?? 'run') : 'not_applicable',
         setupSource: createsWorktree
           ? params.setup
@@ -124,6 +121,8 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           : 'existing_worktree'
       }
       const started = db.createStartingWorkerDispatch({
+        creator: resolveDispatchCreator(runtime, params.from),
+        maxDepth: runtime.getNestedWorkerMaxDepth(),
         taskId: task.id,
         retryOf: params.retryOf,
         startOptions,
@@ -149,14 +148,14 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         state: 'not_applicable'
       }
       try {
-        if (createsWorktree) {
+        if (creationWorktree) {
           failedStage = 'worktree_create'
           const created = await createWorkerWorktree({
             runtime,
             db,
             dispatchId: started.dispatch.id,
             requestedWorktree,
-            coordinatorWorktree,
+            coordinatorWorktree: creationWorktree,
             params,
             agent: agent as TuiAgent,
             launchPreferences: launch.preferences,
@@ -210,7 +209,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         failedStage = 'agent_readiness'
         const wait = await runtime.waitForTerminal(terminalHandle, {
           condition: 'tui-idle',
-          timeoutMs: params.timeoutMs ?? 60_000
+          timeoutMs: readinessTimeoutMs
         })
         persistWorkerSetupWaitOutcome({ ...setupStage, wait })
         if (!wait.satisfied) {
@@ -225,16 +224,16 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
         }
         if (params.managedAccount) {
           failedStage = 'account_verification'
-          await verifyWorkerLaunchAccount({
-            runtime,
-            db,
-            dispatchId: started.dispatch.id,
-            worktreeId: resolvedWorktree.id,
-            terminalHandle,
-            managedAccountId: params.managedAccount.id,
-            effects
-          })
         }
+        await verifyRequestedWorkerLaunchAccount({
+          runtime,
+          db,
+          dispatchId: started.dispatch.id,
+          worktreeId: resolvedWorktree.id,
+          terminalHandle,
+          managedAccountId: params.managedAccount?.id,
+          effects
+        })
         const terminalAuthority = requireWorkerAuthority(runtime, terminalHandle)
         const capability = db.prepareStartingWorkerAuthority({
           dispatchId: started.dispatch.id,
@@ -248,6 +247,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
 
         failedStage = 'dispatch_input'
         const preamble = buildDispatchPreamble({
+          canDispatchSubWorkers: started.dispatch.depth < runtime.getNestedWorkerMaxDepth(),
           taskId: task.id,
           dispatchId: started.dispatch.id,
           taskSpec: task.spec,
@@ -281,7 +281,7 @@ export const ORCHESTRATION_WORKER_START_METHODS: RpcMethod[] = [
           stage: worker.stage,
           setup: setupReceipt,
           launch: launch.receipt,
-          timeoutMs: params.timeoutMs ?? 60_000,
+          timeoutMs: readinessTimeoutMs,
           effects,
           residualResources: [],
           ...(terminalRevealWarning ? { warning: terminalRevealWarning } : {})

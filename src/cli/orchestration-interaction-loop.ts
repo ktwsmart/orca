@@ -1,4 +1,4 @@
-import type { CodexManagedAccountSummary } from '../shared/types'
+import type { CodexManagedAccountSummary } from '../shared/managed-account-types'
 import type { OrchestrationMessageSummary } from '../shared/orchestration-check-output'
 import type { OrchestrationWorkerReadResult } from '../shared/orchestration-worker-output'
 import type { GitStatusResult } from '../shared/git-status-types'

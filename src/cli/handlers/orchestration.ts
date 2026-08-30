@@ -23,7 +23,7 @@ import type {
 } from '../../shared/orchestration-worker-output'
 import type { NativeChatMessage } from '../../shared/native-chat-types'
 import type { RuntimeStatus, RuntimeTerminalRead } from '../../shared/runtime-types'
-import type { CodexRateLimitAccountsState } from '../../shared/types'
+import type { CodexRateLimitAccountsState } from '../../shared/managed-account-types'
 import type { GitStatusResult } from '../../shared/git-status-types'
 import {
   ORCHESTRATION_WORKER_LAUNCH_PREFERENCES_RUNTIME_CAPABILITY,
@@ -50,6 +50,21 @@ import {
   resolveCodexAccount,
   boundedPollDelayMs
 } from '../orchestration-interaction-loop'
+import { ORCHESTRATION_CHECK_HANDLER } from './orchestration/message-check-handler'
+import {
+  ORCHESTRATION_DISPATCH_HANDLER,
+  ORCHESTRATION_DISPATCH_INSPECTION_HANDLERS
+} from './orchestration/dispatch-handlers'
+import { ORCHESTRATION_GATE_HANDLERS } from './orchestration/gate-handlers'
+import { ORCHESTRATION_INBOX_HANDLERS } from './orchestration/message-inbox-handlers'
+import { ORCHESTRATION_QUESTION_HANDLER } from './orchestration/question-handler'
+import { ORCHESTRATION_RESET_HANDLER } from './orchestration/reset-handler'
+import { ORCHESTRATION_RUN_HANDLERS } from './orchestration/run-handlers'
+import { ORCHESTRATION_SEND_HANDLER } from './orchestration/message-send-handler'
+import { ORCHESTRATION_TASK_HANDLERS } from './orchestration/task-handlers'
+import { ORCHESTRATION_WORKER_LAUNCH_HANDLER } from './orchestration/worker-launch-handler'
+import { ORCHESTRATION_WORKER_OBSERVATION_HANDLERS } from './orchestration/worker-observation-handlers'
+import { ORCHESTRATION_WORKER_TERMINAL_HANDLERS } from './orchestration/worker-terminal-handlers'
 
 // Why: 15 s is well under Claude Code's ~2 min Bash-tool silence budget while keeping log volume low. See design doc §3.4.
 const DEFAULT_KEEPALIVE_INTERVAL_MS = 15_000
@@ -543,7 +558,7 @@ function safeJson(value: unknown): string {
   }
 }
 
-export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
+const KTW_LEGACY_ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
   'orchestration run-create': async ({ flags, client, cwd, json }) => {
     const from = await resolveCoordinatorTerminalHandle(flags, cwd, client)
     const result = await callMutation<{
@@ -1894,4 +1909,33 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
     })
     printResult(result, json, (r) => `Reset: ${r.reset}`)
   }
+}
+
+// Upstream split the standard orchestration commands into focused modules. Keep
+// those implementations authoritative while retaining only KTW's two additional
+// account-failover and acceptance-loop commands from the pre-split compatibility layer.
+export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
+  ...ORCHESTRATION_RUN_HANDLERS,
+  ...ORCHESTRATION_SEND_HANDLER,
+  ...ORCHESTRATION_CHECK_HANDLER,
+  ...ORCHESTRATION_INBOX_HANDLERS,
+  ...ORCHESTRATION_TASK_HANDLERS,
+  ...ORCHESTRATION_WORKER_LAUNCH_HANDLER,
+  'orchestration worker-supervise':
+    KTW_LEGACY_ORCHESTRATION_HANDLERS['orchestration worker-supervise'],
+  ...ORCHESTRATION_WORKER_OBSERVATION_HANDLERS,
+  'orchestration worker-stop': ORCHESTRATION_WORKER_TERMINAL_HANDLERS['orchestration worker-stop'],
+  'orchestration worker-abandon':
+    ORCHESTRATION_WORKER_TERMINAL_HANDLERS['orchestration worker-abandon'],
+  'orchestration worker-release':
+    ORCHESTRATION_WORKER_TERMINAL_HANDLERS['orchestration worker-release'],
+  'orchestration worker-accept': KTW_LEGACY_ORCHESTRATION_HANDLERS['orchestration worker-accept'],
+  'orchestration worker-retain':
+    ORCHESTRATION_WORKER_TERMINAL_HANDLERS['orchestration worker-retain'],
+  'orchestration worker-list': ORCHESTRATION_WORKER_TERMINAL_HANDLERS['orchestration worker-list'],
+  ...ORCHESTRATION_DISPATCH_HANDLER,
+  ...ORCHESTRATION_QUESTION_HANDLER,
+  ...ORCHESTRATION_DISPATCH_INSPECTION_HANDLERS,
+  ...ORCHESTRATION_GATE_HANDLERS,
+  ...ORCHESTRATION_RESET_HANDLER
 }

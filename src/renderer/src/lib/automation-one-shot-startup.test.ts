@@ -112,7 +112,8 @@ describe('automation one-shot startup', () => {
     const oneShot = planAutomationOneShotStartup(base)
     const plan = { launchCommand: 'cursor-agent --print task' } as never
 
-    expect(oneShot.shell).toBe('fish')
+    expect(oneShot.shell).toBe('posix')
+    expect(oneShot.exitShell).toBe('fish')
     expect(applyAutomationOneShotCommand(plan, oneShot)).toBe('process-exit')
     expect((plan as { launchCommand: string }).launchCommand).toBe(
       'cursor-agent --print task; set -l orca_status $status; exit $orca_status'
@@ -122,7 +123,8 @@ describe('automation one-shot startup', () => {
   it('uses an agent SHELL override because the local PTY uses the same environment', () => {
     const oneShot = planAutomationOneShotStartup({ ...base, loginShell: '/opt/homebrew/bin/fish' })
 
-    expect(oneShot.shell).toBe('fish')
+    expect(oneShot.shell).toBe('posix')
+    expect(oneShot.exitShell).toBe('fish')
   })
 
   it('leaves fallback plans untouched and agent-status authoritative', () => {

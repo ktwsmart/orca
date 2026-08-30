@@ -1,6 +1,10 @@
 import { isTuiAgent } from '../../../../shared/tui-agent-config'
-import type { TuiAgent } from '../../../../shared/types'
+import type { TuiAgent } from '../../../../shared/tui-agent'
 import type { OrcaRuntimeService } from '../../orca-runtime'
+import {
+  isWorkerStartTimeoutWithinTimerLimit,
+  resolveWorkerStartReadinessTimeoutMs
+} from '../../../../shared/orchestration-timing-budgets'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { FederationAttachStartInput } from './orchestration-federation-start-schema'
 import {
@@ -84,6 +88,39 @@ export function prepareLocalWorkerStart(args: {
     effort: params.effort,
     missingAgentMessage: 'A configured --agent is required when worker-start creates a terminal.'
   })
+}
+
+export function resolveWorkerStartReadinessTimeoutOrThrow(timeoutMs?: number): number {
+  if (!isWorkerStartTimeoutWithinTimerLimit(timeoutMs)) {
+    throw new OrchestrationError(
+      'invalid_argument',
+      '--timeout-ms is too large for worker-start transport grace; the derived timeout must fit within the timer limit.'
+    )
+  }
+  return resolveWorkerStartReadinessTimeoutMs(timeoutMs)
+}
+
+export async function assertReusableWorkerTerminal(args: {
+  runtime: OrcaRuntimeService
+  terminal?: string
+  resolvedWorktreeId?: string
+}): Promise<void> {
+  if (!args.terminal) {
+    return
+  }
+  const terminal = await args.runtime.showTerminal(args.terminal)
+  if (terminal.worktreeId !== args.resolvedWorktreeId) {
+    throw new OrchestrationError(
+      'terminal_worktree_mismatch',
+      `Terminal ${args.terminal} does not belong to worktree ${args.resolvedWorktreeId}.`
+    )
+  }
+  if (!(await args.runtime.isTerminalRunningAgent(args.terminal))) {
+    throw new OrchestrationError(
+      'agent_unconfigured',
+      `Terminal ${args.terminal} is not running a recognized agent.`
+    )
+  }
 }
 
 export function prepareFederationAttachmentWorkerStart(args: {
