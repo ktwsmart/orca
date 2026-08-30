@@ -29,8 +29,13 @@ export type AutomationRunTerminalHost = {
   getTerminalHandleForPaneKey(paneKey: string): string | null
   waitForTerminal(
     handle: string,
-    options?: { condition?: 'tui-idle'; timeoutMs?: number; signal?: AbortSignal }
-  ): Promise<{ satisfied: boolean; blockedReason?: string }>
+    options?: { condition?: 'exit' | 'tui-idle'; timeoutMs?: number; signal?: AbortSignal }
+  ): Promise<{
+    satisfied: boolean
+    status?: string
+    exitCode?: number | null
+    blockedReason?: string
+  }>
   readTerminal(handle: string, opts?: { limit?: number }): Promise<{ tail: string[] }>
 }
 
@@ -145,54 +150,101 @@ async function buildUnobservedObservation(
   }
 }
 
+async function observeProcessExit(
+  runtime: AutomationRunTerminalHost,
+  handle: string,
+  signal: AbortSignal
+): Promise<AutomationRunCompletionObservation> {
+  let wait: Awaited<ReturnType<AutomationRunTerminalHost['waitForTerminal']>>
+  try {
+    wait = await runtime.waitForTerminal(handle, {
+      condition: 'exit',
+      timeoutMs: OBSERVE_DEADLINE_MS,
+      signal
+    })
+  } catch (error) {
+    if (!isTerminalWaitTimeout(error)) {
+      throw error
+    }
+    return await buildUnobservedObservation(
+      runtime,
+      handle,
+      'Orca stopped watching this one-shot process after 6h without an exit.'
+    )
+  }
+  const outputSnapshot = await readTerminalSnapshot(runtime, handle)
+  if (wait.satisfied && wait.exitCode === 0) {
+    return { status: 'completed', outputSnapshot, error: null }
+  }
+  const detail =
+    typeof wait.exitCode === 'number'
+      ? ` with code ${wait.exitCode}`
+      : ' without a verified exit code'
+  return {
+    status: 'dispatch_failed',
+    outputSnapshot,
+    error: `Automation one-shot process exited${detail}.`
+  }
+}
+
+async function observeAgentStatusCompletion(
+  runtime: AutomationRunTerminalHost,
+  handle: string,
+  signal: AbortSignal
+): Promise<AutomationRunCompletionObservation> {
+  const startedAt = Date.now()
+  // Why: tui-idle is level-triggered, so a reused pane still idle from the
+  // PREVIOUS run satisfies it before this run's agent has typed a character.
+  // Evidence that predates dispatch proves nothing about this run, so require
+  // the pane to leave that state first — the busy edge the renderer's own
+  // dispatch observer requires on reuse (requireWorkingAfterStart).
+  if (await isTuiIdleSatisfiedNow(runtime, handle, signal)) {
+    const started = await waitForAgentStart(
+      runtime,
+      handle,
+      signal,
+      startedAt + AGENT_START_DEADLINE_MS
+    )
+    if (!started) {
+      return await buildUnobservedObservation(
+        runtime,
+        handle,
+        'Automation agent never started after the prompt was submitted.'
+      )
+    }
+  }
+  const deadlineAt = startedAt + OBSERVE_DEADLINE_MS
+  for (;;) {
+    try {
+      const wait = await runtime.waitForTerminal(handle, { condition: 'tui-idle', signal })
+      return await buildObservation(runtime, handle, wait)
+    } catch (error) {
+      // Why: tui-idle waits expire on their own schedule; an agent still
+      // working past that window is live, so re-arm rather than fail it.
+      if (signal.aborted || !isTerminalWaitTimeout(error)) {
+        throw error
+      }
+      if (Date.now() >= deadlineAt) {
+        return await buildUnobservedObservation(
+          runtime,
+          handle,
+          'Orca stopped watching this run after 6h without a completion signal.'
+        )
+      }
+    }
+  }
+}
+
 export function createRuntimeAutomationRunTerminalObserver(
   runtime: AutomationRunTerminalHost
 ): AutomationRunTerminalObserver {
   return {
     resolveRunTerminal: (run) =>
       run.terminalPaneKey ? runtime.getTerminalHandleForPaneKey(run.terminalPaneKey) : null,
-    observeCompletion: async (handle, { signal }) => {
-      const startedAt = Date.now()
-      // Why: tui-idle is level-triggered, so a reused pane still idle from the
-      // PREVIOUS run satisfies it before this run's agent has typed a character.
-      // Evidence that predates dispatch proves nothing about this run, so require
-      // the pane to leave that state first — the busy edge the renderer's own
-      // dispatch observer requires on reuse (requireWorkingAfterStart).
-      if (await isTuiIdleSatisfiedNow(runtime, handle, signal)) {
-        const started = await waitForAgentStart(
-          runtime,
-          handle,
-          signal,
-          startedAt + AGENT_START_DEADLINE_MS
-        )
-        if (!started) {
-          return await buildUnobservedObservation(
-            runtime,
-            handle,
-            'Automation agent never started after the prompt was submitted.'
-          )
-        }
-      }
-      const deadlineAt = startedAt + OBSERVE_DEADLINE_MS
-      for (;;) {
-        try {
-          const wait = await runtime.waitForTerminal(handle, { condition: 'tui-idle', signal })
-          return await buildObservation(runtime, handle, wait)
-        } catch (error) {
-          // Why: tui-idle waits expire on their own schedule; an agent still
-          // working past that window is live, so re-arm rather than fail it.
-          if (signal.aborted || !isTerminalWaitTimeout(error)) {
-            throw error
-          }
-          if (Date.now() >= deadlineAt) {
-            return await buildUnobservedObservation(
-              runtime,
-              handle,
-              'Orca stopped watching this run after 6h without a completion signal.'
-            )
-          }
-        }
-      }
+    observeCompletion: async (handle, { signal, completionAuthority }) => {
+      return completionAuthority === 'process-exit'
+        ? await observeProcessExit(runtime, handle, signal)
+        : await observeAgentStatusCompletion(runtime, handle, signal)
     }
   }
 }

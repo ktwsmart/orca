@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { Repo } from '../../shared/repo-types'
-import type { Automation, AutomationRun } from '../../shared/automations-types'
+import type {
+  Automation,
+  AutomationRun,
+  AutomationRunCompletionAuthority
+} from '../../shared/automations-types'
 import type { AutomationsChangedPayload } from '../../shared/runtime-client-events'
 import { AutomationService } from './service'
 import type {
@@ -81,13 +85,17 @@ function readRun(store: TestStore, automationId: string, runId: string): Automat
 }
 
 function createObserver(
-  observe: (signal: AbortSignal) => Promise<AutomationRunCompletionObservation>,
+  observe: (
+    signal: AbortSignal,
+    completionAuthority: AutomationRunCompletionAuthority
+  ) => Promise<AutomationRunCompletionObservation>,
   resolveRunTerminal: (run: AutomationRun) => string | null = (run) =>
     run.terminalPaneKey ? 'handle-1' : null
 ): AutomationRunTerminalObserver {
   return {
     resolveRunTerminal,
-    observeCompletion: (_handle, { signal }) => observe(signal)
+    observeCompletion: (_handle, { signal, completionAuthority }) =>
+      observe(signal, completionAuthority)
   }
 }
 
@@ -116,6 +124,33 @@ describe('authority-owned automation run completion', () => {
     await vi.waitFor(() => {
       expect(readRun(store, automation.id, run.id).status).toBe('completed')
     })
+    service.stop()
+  })
+
+  it('uses the persisted launch authority and fails old runs safe to agent-status', async () => {
+    const store = await createStore()
+    const automation = createAutomation(store)
+    const seen: AutomationRunCompletionAuthority[] = []
+    const service = new AutomationService(store, {
+      headlessDispatcher: async () => ({ ...LAUNCH_TARGET }),
+      terminalObserver: createObserver(async (_signal, authority) => {
+        seen.push(authority)
+        return { status: 'completed', error: null }
+      })
+    })
+
+    const oldRun = store.createAutomationRun(automation, 1_000, 'manual')
+    store.updateAutomationRun({ runId: oldRun.id, status: 'dispatched', ...LAUNCH_TARGET })
+    const processExitRun = store.createAutomationRun(automation, 2_000, 'manual')
+    store.updateAutomationRun({
+      runId: processExitRun.id,
+      status: 'dispatched',
+      ...LAUNCH_TARGET,
+      terminalPaneKey: 'tab-2:11111111-2222-4333-8444-555555555556',
+      completionAuthority: 'process-exit'
+    })
+    service.start()
+    await vi.waitFor(() => expect(seen).toEqual(['process-exit', 'agent-status']))
     service.stop()
   })
 
