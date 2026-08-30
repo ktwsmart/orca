@@ -333,6 +333,7 @@ export function useAutomationDispatchEvents(): void {
           let dispatchMarked = false
           let pendingExitCode: number | null = null
           let pendingDone = false
+          let freshCompletionAuthority: 'pending' | 'agent-status' | 'process-exit' = 'pending'
           let completionMarked = false
           let unsubscribeAgentStatus = (): void => {}
           let unsubscribeSessionObserver = (): void => {}
@@ -430,6 +431,15 @@ export function useAutomationDispatchEvents(): void {
               return
             }
             settleLateResult(markCompletionResult())
+          }
+          const handleFreshAgentDone = (): void => {
+            if (freshCompletionAuthority === 'pending') {
+              pendingDone = true
+              return
+            }
+            if (freshCompletionAuthority === 'agent-status') {
+              handleAgentDone()
+            }
           }
           const observeAgentStatus = (
             targetPaneKey: string,
@@ -587,6 +597,7 @@ export function useAutomationDispatchEvents(): void {
             prompt: automation.prompt,
             launchSource: 'unknown',
             title: run.title,
+            oneShot: !automation.reuseSession,
             onData: (chunk) => {
               outputSnapshotBuffer.append(chunk)
             },
@@ -597,7 +608,7 @@ export function useAutomationDispatchEvents(): void {
               if (payload.state !== 'done' || payload.sessionBoundary === true) {
                 return
               }
-              handleAgentDone()
+              handleFreshAgentDone()
             },
             onExit: (_ptyId, code) => {
               if (completionMarked) {
@@ -614,13 +625,19 @@ export function useAutomationDispatchEvents(): void {
             throw new Error('Unable to build an agent launch plan.')
           }
           terminalOwnership = result.terminalOwnership
+          freshCompletionAuthority = result.completionAuthority
+          if (freshCompletionAuthority === 'process-exit') {
+            pendingDone = false
+          }
           if (automation.reuseSession) {
             // Why: the first fresh launch is the seed for later reuse and must
             // survive completion under the same policy as an already-reused tab.
             releaseTerminalOwnership()
           }
           const launchedTabId = result.tabId
-          observeAgentStatus(result.paneKey, dispatchStartedAt)
+          if (freshCompletionAuthority === 'agent-status') {
+            observeAgentStatus(result.paneKey, dispatchStartedAt)
+          }
           try {
             await markDispatchResult({
               runId: run.id,
@@ -634,7 +651,7 @@ export function useAutomationDispatchEvents(): void {
               error: null
             })
             dispatchMarked = true
-            if (pendingDone) {
+            if (pendingDone && freshCompletionAuthority === 'agent-status') {
               await markCompletionResult()
             } else if (pendingExitCode !== null) {
               await markExitResult(pendingExitCode)

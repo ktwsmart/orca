@@ -922,4 +922,19 @@ describe('tui agent startup plans', () => {
   it('appends Devin default permission-mode bypass before stdin prompt delivery', () => {
     expect(resolveTuiAgentLaunchArgs('devin', null)).toBe('--permission-mode bypass')
   })
+
+  it('allows automation to use Antigravity native one-shot prompt without changing TUI defaults', () => {
+    const plan = buildAgentStartupPlan({
+      agent: 'antigravity',
+      prompt: 'audit now',
+      cmdOverrides: {},
+      agentArgs: '--model claude-sonnet-4-6',
+      platform: 'darwin',
+      shell: 'posix',
+      promptInjectionModeOverride: 'flag-prompt'
+    })
+
+    expect(plan?.launchCommand).toBe("agy '--model' 'claude-sonnet-4-6' --prompt 'audit now'")
+    expect(TUI_AGENT_CONFIG.antigravity.promptInjectionMode).toBe('flag-prompt-interactive')
+  })
 })

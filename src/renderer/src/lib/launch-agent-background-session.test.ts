@@ -36,6 +36,41 @@ const state = createAgentBackgroundSessionTestState({
   setTabLayout: mockSetTabLayout,
   registerAgentLaunchConfig: mockRegisterAgentLaunchConfig
 })
+
+describe('automation one-shot command planning', () => {
+  it('adds Cursor print mode once', async () => {
+    const { resolveAutomationOneShotAgentArgs } = await import('./agent-background-session-contract')
+
+    expect(resolveAutomationOneShotAgentArgs('cursor', '--trust --model grok')).toBe(
+      '--trust --model grok --print'
+    )
+    expect(resolveAutomationOneShotAgentArgs('cursor', '--trust -p --model grok')).toBe(
+      '--trust -p --model grok'
+    )
+    expect(resolveAutomationOneShotAgentArgs('antigravity', '--model sonnet')).toBe('--model sonnet')
+  })
+
+  it.each([
+    ['posix', 'agent --print task; orca_status=$?; exit "$orca_status"'],
+    ['fish', 'agent --print task; set -l orca_status $status; exit $orca_status']
+  ] as const)('preserves one-shot exit status and exits the %s shell', async (shell, expected) => {
+    const { wrapAutomationOneShotCommand } = await import('./agent-background-session-contract')
+
+    expect(wrapAutomationOneShotCommand('agent --print task', shell)).toEqual({
+      command: expected,
+      completionAuthority: 'process-exit'
+    })
+  })
+
+  it('falls back to agent status in cmd where delayed ERRORLEVEL is unsafe', async () => {
+    const { wrapAutomationOneShotCommand } = await import('./agent-background-session-contract')
+
+    expect(wrapAutomationOneShotCommand('agent --print task', 'cmd')).toEqual({
+      command: 'agent --print task',
+      completionAuthority: 'agent-status'
+    })
+  })
+})
 let currentStoreState = state
 
 vi.mock('@/store', () => ({
@@ -88,6 +123,46 @@ describe('launchAgentBackgroundSession', () => {
       spawn: mockSpawn,
       write: mockWrite
     })
+  })
+
+  it('launches Antigravity automation as native one-shot and makes process exit authoritative', async () => {
+    Object.assign(state.settings, {
+      agentDefaultArgs: { antigravity: '--model claude-sonnet-4-6 --print-timeout 10m' }
+    })
+    const { launchAgentBackgroundSession } = await import('./launch-agent-background-session')
+
+    const result = await launchAgentBackgroundSession({
+      agent: 'antigravity',
+      worktreeId: 'wt-1',
+      prompt: 'run the audit',
+      oneShot: true
+    })
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.stringMatching(
+          /^agy '--model' 'claude-sonnet-4-6' '--print-timeout' '10m' --prompt 'run the audit'; orca_status=\$\?; exit "\$orca_status"$/
+        )
+      })
+    )
+    expect(result?.completionAuthority).toBe('process-exit')
+  })
+
+  it('forces Cursor print mode for one-shot automation without duplicating a configured flag', async () => {
+    Object.assign(state.settings, { agentDefaultArgs: { cursor: '--trust --model grok' } })
+    const { launchAgentBackgroundSession } = await import('./launch-agent-background-session')
+
+    const result = await launchAgentBackgroundSession({
+      agent: 'cursor',
+      worktreeId: 'wt-1',
+      prompt: 'run the audit',
+      oneShot: true
+    })
+
+    const command = mockSpawn.mock.calls[0]?.[0]?.command as string
+    expect(command).toContain("cursor-agent '--trust' '--model' 'grok' '--print' 'run the audit'")
+    expect(command.match(/'--print'/g)).toHaveLength(1)
+    expect(result?.completionAuthority).toBe('process-exit')
   })
 
   it('spawns a PTY first and creates the inactive tab already bound to it', async () => {

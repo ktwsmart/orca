@@ -1,33 +1,26 @@
 import { useAppStore } from '@/store'
 import { buildAgentStartupPlan } from '@/lib/tui-agent-startup'
-import type {
-  LaunchAgentBackgroundSessionArgs,
-  LaunchAgentBackgroundSessionResult
+import {
+  applyAutomationOneShotStartup,
+  automationPromptInjectionMode,
+  resolveAutomationOneShotAgentArgs,
+  type LaunchAgentBackgroundSessionArgs,
+  type LaunchAgentBackgroundSessionResult
 } from '@/lib/agent-background-session-contract'
 import { tuiAgentToAgentKind } from '@/lib/telemetry'
 import { scheduleAgentBackgroundDraft } from '@/lib/agent-background-draft-delivery'
 import { requestBackgroundTerminalWorktreeMount } from '@/components/terminal/background-terminal-worktree-mount'
-import {
-  resolveTuiAgentLaunchArgs,
-  resolveTuiAgentLaunchEnv
-} from '../../../shared/tui-agent-launch-defaults'
+import { resolveTuiAgentLaunchArgs, resolveTuiAgentLaunchEnv } from '../../../shared/tui-agent-launch-defaults'
 import { TUI_AGENT_CONFIG } from '../../../shared/tui-agent-config'
 import { resolveAgentBackgroundLaunchHost } from '@/lib/agent-background-session-launch-host'
 import { makePaneKey } from '../../../shared/stable-pane-id'
-import {
-  registerEagerPtyBuffer,
-  subscribeToPtyExit,
-  type EagerPtyHandle
-} from '@/components/terminal-pane/pty-dispatcher'
+import { registerEagerPtyBuffer, subscribeToPtyExit, type EagerPtyHandle } from '@/components/terminal-pane/pty-dispatcher'
 import { subscribeToPtyData } from '@/components/terminal-pane/pty-data-sidecar-subscriptions'
 import { callRuntimeRpc, getActiveRuntimeTarget } from '@/runtime/runtime-rpc-client'
 import { getSettingsForWorktreeRuntimeOwner } from '@/lib/worktree-runtime-owner'
 import { retireProvider } from '@/lib/retire-unowned-background-terminal'
 import { createRuntimeAgentBackgroundTerminal } from '@/lib/runtime-agent-background-create'
-import {
-  subscribeToRuntimeTerminalData,
-  toRemoteRuntimePtyId
-} from '@/runtime/runtime-terminal-stream'
+import { subscribeToRuntimeTerminalData, toRemoteRuntimePtyId } from '@/runtime/runtime-terminal-stream'
 import { createSshBackgroundStartupDelivery } from '@/lib/ssh-background-startup-delivery'
 import { shouldUseShellReadyStartupDelivery } from '../../../shared/codex-startup-delivery'
 import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-pane/terminal-side-effect-facts-handler'
@@ -53,7 +46,7 @@ export async function launchAgentBackgroundSession(
     throw new Error('The target workspace is no longer available.')
   }
   const cmdOverrides = store.settings?.agentCmdOverrides ?? {}
-  const agentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
+  const defaultAgentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs), agentArgs = args.oneShot ? resolveAutomationOneShotAgentArgs(agent, defaultAgentArgs) : defaultAgentArgs
   const agentEnv = resolveTuiAgentLaunchEnv(agent, store.settings?.agentDefaultEnv)
   // Folder launch ownership cannot be derived from a repo row (#2989).
   const launchHost = resolveAgentBackgroundLaunchHost({
@@ -93,12 +86,14 @@ export async function launchAgentBackgroundSession(
     agentEnv,
     platform: launchPlatform,
     shell: startupShell,
+    promptInjectionModeOverride: automationPromptInjectionMode(agent, args.oneShot),
     isRemote,
     allowEmptyPromptLaunch: !hasPrompt || isFollowupPath
   })
   if (!startupPlan) {
     return null
   }
+  const completionAuthority = applyAutomationOneShotStartup(startupPlan, args.oneShot, launchPlatform, startupShell)
 
   // A hidden run tab must never be store-visible without its PTY (#2989).
   const { reservedTabId, leafId, launchToken, launchRegistration, paneEnv } =
@@ -179,7 +174,7 @@ export async function launchAgentBackgroundSession(
         tabId: reservedTabId,
         leafId,
         agent,
-        ...(hasPrompt && !isFollowupPath ? { prompt: trimmedPrompt } : {}),
+        ...(hasPrompt && !isFollowupPath && !args.oneShot ? { prompt: trimmedPrompt } : {}),
         ...(startupPlan.sessionOptions ? { sessionOptions: startupPlan.sessionOptions } : {}),
         legacy: {
           command: startupPlan.launchCommand,
@@ -296,7 +291,14 @@ export async function launchAgentBackgroundSession(
       scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
     }
 
-    return { tabId: tab.id, paneKey, ptyId, startupPlan, terminalOwnership }
+    return {
+      tabId: tab.id,
+      paneKey,
+      ptyId,
+      startupPlan,
+      terminalOwnership,
+      completionAuthority
+    }
   } catch (error) {
     // Why: terminal creation and stream subscription are separate remote calls.
     // A failure between them must not strand an invisible runtime terminal.
