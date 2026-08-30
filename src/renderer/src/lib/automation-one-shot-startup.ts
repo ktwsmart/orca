@@ -12,7 +12,10 @@ import { TUI_AGENT_CONFIG } from '../../../shared/tui-agent-config'
 import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
 import { isWslUncPath } from '../../../shared/wsl-paths'
 import { CLIENT_PLATFORM } from '@/lib/new-workspace'
-import { isPrintModeHeadlessOneShotCommand } from '../../../shared/print-mode-headless-command'
+import {
+  isPrintModeHeadlessOneShotCommand,
+  optionName
+} from '../../../shared/print-mode-headless-command'
 
 export type AutomationOneShotStartupPlan = {
   enabled: boolean
@@ -33,6 +36,7 @@ export function planAutomationOneShotStartup(args: {
   hasConnection: boolean
   isEnvironment: boolean
   isWsl: boolean
+  loginShell?: string
 }): AutomationOneShotStartupPlan {
   const fallbackShell = resolveStartupShell(args.platform, args.startupShell)
   const eligible =
@@ -54,9 +58,13 @@ export function planAutomationOneShotStartup(args: {
     }
   }
 
-  const shell = resolveLoginShellStartupDialect(getClientLoginShell())
+  const shell = resolveLoginShellStartupDialect(args.loginShell?.trim() || getClientLoginShell())
   const tokenized = tokenizeStartupCommand(args.agentArgs, shell)
-  if (!tokenized.ok || tokenized.tokens.includes('--')) {
+  if (
+    !tokenized.ok ||
+    tokenized.tokens.includes('--') ||
+    tokenized.spans.some((span) => span.divergesFromShell)
+  ) {
     return {
       enabled: false,
       agentArgs: args.agentArgs,
@@ -65,7 +73,12 @@ export function planAutomationOneShotStartup(args: {
     }
   }
   if (args.agent === 'antigravity') {
-    if (tokenized.tokens.some((token) => token === '-i' || token === '--prompt-interactive')) {
+    if (
+      tokenized.tokens.some((token) => {
+        const name = optionName(token)
+        return name === '-i' || name === '--prompt-interactive'
+      })
+    ) {
       return {
         enabled: false,
         agentArgs: args.agentArgs,
@@ -133,7 +146,8 @@ export function buildAutomationBackgroundStartup(args: {
     startupShell,
     hasConnection: Boolean(args.launchHost.connectionId),
     isEnvironment: args.runtimeKind === 'environment',
-    isWsl: isWslUncPath(args.worktreePath)
+    isWsl: isWslUncPath(args.worktreePath),
+    loginShell: args.agentEnv.SHELL
   })
   const isFollowupPath = TUI_AGENT_CONFIG[args.agent].promptInjectionMode === 'stdin-after-start'
   const plan = buildAgentStartupPlan({

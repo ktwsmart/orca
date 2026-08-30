@@ -61,6 +61,13 @@ describe('automation one-shot startup', () => {
         agentArgs: '--prompt-interactive'
       }).enabled
     ).toBe(false)
+    expect(
+      planAutomationOneShotStartup({
+        ...base,
+        agent: 'antigravity',
+        agentArgs: '--prompt-interactive=true'
+      }).enabled
+    ).toBe(false)
   })
 
   it.each([
@@ -86,6 +93,10 @@ describe('automation one-shot startup', () => {
     expect(planAutomationOneShotStartup({ ...base, agentArgs: '-- -p' }).enabled).toBe(false)
   })
 
+  it('fails closed when an unpaired trailing escape could swallow appended print', () => {
+    expect(planAutomationOneShotStartup({ ...base, agentArgs: '--trust \\' }).enabled).toBe(false)
+  })
+
   it('uses the real fish dialect and preserves process exit status', () => {
     mockGetClientLoginShell.mockReturnValue('/opt/homebrew/bin/fish')
     const oneShot = planAutomationOneShotStartup(base)
@@ -96,6 +107,12 @@ describe('automation one-shot startup', () => {
     expect((plan as { launchCommand: string }).launchCommand).toBe(
       'cursor-agent --print task; set -l orca_status $status; exit $orca_status'
     )
+  })
+
+  it('uses an agent SHELL override because the local PTY uses the same environment', () => {
+    const oneShot = planAutomationOneShotStartup({ ...base, loginShell: '/opt/homebrew/bin/fish' })
+
+    expect(oneShot.shell).toBe('fish')
   })
 
   it('leaves fallback plans untouched and agent-status authoritative', () => {
