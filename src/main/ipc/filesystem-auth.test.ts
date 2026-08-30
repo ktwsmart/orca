@@ -18,7 +18,9 @@ import {
 } from './filesystem-auth'
 import { isDescendantOrEqual, validateGitRelativeFilePath } from './filesystem-path-containment'
 import {
+  getRegisteredWorktreeRootsRevision,
   invalidateAuthorizedRootsCache,
+  registerWorktreeRootsForRepo,
   rebuildAuthorizedRootsCache,
   resolveRegisteredWorktreePath
 } from './registered-worktree-roots-cache'
@@ -141,6 +143,69 @@ describe('filesystem auth worktree roots', () => {
 
     expect(listRepoWorktrees).toHaveBeenCalledTimes(repos.length)
     expect(maxActive).toBeLessThanOrEqual(8)
+  })
+
+  it('preserves roots registered while an older full rebuild is pending', async () => {
+    let resolveScan: (worktrees: GitWorktreeInfo[]) => void = () => {}
+    vi.mocked(listRepoWorktrees).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveScan = resolve
+        })
+    )
+    const store = makeStore()
+    const pendingRebuild = rebuildAuthorizedRootsCache(store)
+    await vi.waitFor(() => expect(listRepoWorktrees).toHaveBeenCalledTimes(1))
+
+    registerWorktreeRootsForRepo(store, repo.id, [repo.path, '/linked/new-worktree'])
+    resolveScan([])
+    await pendingRebuild
+
+    await expect(resolveRegisteredWorktreePath('/linked/new-worktree', store)).resolves.toBe(
+      resolve('/linked/new-worktree')
+    )
+  })
+
+  it('keeps duplicate root registration revision-idempotent but advances on a real change', () => {
+    const store = makeStore()
+    registerWorktreeRootsForRepo(store, repo.id, [repo.path, '/linked/worktree'])
+    const firstRevision = getRegisteredWorktreeRootsRevision(repo.id)
+
+    registerWorktreeRootsForRepo(store, repo.id, ['/linked/worktree', repo.path])
+    expect(getRegisteredWorktreeRootsRevision(repo.id)).toBe(firstRevision)
+
+    registerWorktreeRootsForRepo(store, repo.id, [repo.path, '/linked/new-worktree'])
+    expect(getRegisteredWorktreeRootsRevision(repo.id)).toBeGreaterThan(firstRevision)
+  })
+
+  it('does not restore roots from a rebuild invalidated while pending', async () => {
+    let resolveScan: (worktrees: GitWorktreeInfo[]) => void = () => {}
+    vi.mocked(listRepoWorktrees).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveScan = resolve
+        })
+    )
+    const store = makeStore()
+    const pendingRebuild = rebuildAuthorizedRootsCache(store)
+    await vi.waitFor(() => expect(listRepoWorktrees).toHaveBeenCalledTimes(1))
+
+    invalidateAuthorizedRootsCache()
+    resolveScan([
+      {
+        path: '/linked/stale-worktree',
+        head: '',
+        branch: 'refs/heads/stale',
+        isBare: false,
+        isMainWorktree: false
+      }
+    ])
+    await pendingRebuild
+
+    vi.mocked(listRepoWorktrees).mockResolvedValue([])
+    await expect(resolveRegisteredWorktreePath('/linked/stale-worktree', store)).rejects.toThrow(
+      'Access denied: unknown repository or worktree path'
+    )
   })
 })
 

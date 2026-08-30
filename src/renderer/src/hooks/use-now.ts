@@ -73,7 +73,12 @@ function getSharedNowClock(intervalMs: number): SharedNowClock {
   return clock
 }
 
-// Why: relative timestamps drift once mounted. A 30s tick keeps the "Xm
+// Why: a disabled caller must not hold the shared interval open or re-render on
+// its ticks. It reads the shared snapshot, which is frozen while nobody at this
+// cadence is subscribed — see the activation caveat on useNow.
+const subscribeWhileDisabled = (): (() => void) => () => {}
+
+// Why: relative timestamps drift once mounted. A coarse tick keeps the "Xm
 // ago" labels honest without burning a render every second.
 //
 // Hoisted to a shared hook so container components (e.g.
@@ -81,7 +86,18 @@ function getSharedNowClock(intervalMs: number): SharedNowClock {
 // DashboardAgentRow. Previously each row instantiated its own interval,
 // which meant N timers firing at staggered mount times for N rows on
 // screen — turning one logical tick into N independent React commits.
-export function useNow(intervalMs: number): number {
+//
+// Pass `enabled: false` while a surface cannot show the value. Activation is not
+// instant: subscription happens in a passive effect, so the render that flips
+// `enabled` still reads the previous snapshot — at most `intervalMs` old if
+// another caller keeps the cadence running, and arbitrarily old if none does.
+// Fine for a drifting label, wrong for a deadline; check those against
+// `Date.now()` in the effect that acts on them instead.
+export function useNow(intervalMs: number, enabled = true): number {
   const clock = getSharedNowClock(intervalMs)
-  return useSyncExternalStore(clock.subscribe, clock.getSnapshot, clock.getSnapshot)
+  return useSyncExternalStore(
+    enabled ? clock.subscribe : subscribeWhileDisabled,
+    clock.getSnapshot,
+    clock.getSnapshot
+  )
 }

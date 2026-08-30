@@ -18,6 +18,10 @@
 # source patch under xterm-src/ instead. The sibling patches stay diffable.
 /config/patches/@xterm__xterm@*.patch -diff
 /config/patches/xterm-src/*.patch text eol=lf
+# Unified-diff blank context lines are encoded as one literal space. Treating
+# that required prefix as blank-at-eol makes `git diff --check` reject a valid,
+# generator-verified patch; all other whitespace checks remain enabled.
+/config/patches/xterm-src/*.patch whitespace=-blank-at-eol
 # Generated wrapper fixtures: collapse them in the PR diff so they stop drowning
 # the reviewable change, and pin LF because they are compared byte-for-byte.
 # Not -diff: the shell diff is the review surface when a wrapper does change.

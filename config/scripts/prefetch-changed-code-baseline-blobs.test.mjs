@@ -42,8 +42,10 @@ function createGitDouble() {
     if (args[0] === 'ls-tree') {
       return ''
     }
-    if (args[0] === 'fetch') {
-      return ''
+    if (args[0] === 'cat-file') {
+      return [FIRST_BLOB, DELETED_BLOB, RENAMED_BLOB, SECOND_BLOB]
+        .map((objectId) => `${objectId} blob`)
+        .join('\n')
     }
     throw new Error(`Unexpected git call: ${args.join(' ')}`)
   })
@@ -69,7 +71,7 @@ describe('changed-code baseline blob prefetch', () => {
     ])
   })
 
-  it('fetches exact blob ids from a trusted GitHub source without writing FETCH_HEAD', () => {
+  it('hydrates exact blob ids through the partial-clone promisor transport', () => {
     const git = createGitDouble()
     expect(
       prefetchChangedCodeBaselineBlobs('/repo', BASELINE, 'https://github.com/stablyai/orca.git', {
@@ -78,18 +80,25 @@ describe('changed-code baseline blob prefetch', () => {
     ).toBe(4)
     expect(git).toHaveBeenCalledWith(
       '/repo',
-      [
-        'fetch',
-        '--no-tags',
-        '--no-write-fetch-head',
-        'https://github.com/stablyai/orca.git',
-        FIRST_BLOB,
-        DELETED_BLOB,
-        RENAMED_BLOB,
-        SECOND_BLOB
-      ],
-      { stdio: 'inherit' }
+      ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
+      { input: `${FIRST_BLOB}\n${DELETED_BLOB}\n${RENAMED_BLOB}\n${SECOND_BLOB}\n` }
     )
+  })
+
+  it('rejects a hydrated object that is missing or is not a blob', () => {
+    const baselineGit = createGitDouble()
+    const git = vi.fn((root, args, options) => {
+      if (args[0] === 'cat-file') {
+        return `${FIRST_BLOB} tree\n`
+      }
+      return baselineGit(root, args, options)
+    })
+
+    expect(() =>
+      prefetchChangedCodeBaselineBlobs('/repo', BASELINE, 'https://github.com/stablyai/orca.git', {
+        git
+      })
+    ).toThrow(`Failed to hydrate verified baseline blob ${FIRST_BLOB}`)
   })
 
   it('rejects a baseline source outside GitHub', () => {

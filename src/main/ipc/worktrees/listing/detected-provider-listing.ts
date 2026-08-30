@@ -21,6 +21,7 @@ import { hasConflictingStoredWorktreeOwner } from './worktree-host-ownership'
 import {
   applyFreshDetectedWorktreeScanSideEffects,
   listDetectedGitWorktrees,
+  rememberLocalWorktreeRoots,
   type DetectedWorktreeMetadataPrune,
   type DetectedWorktreeSideEffectToken
 } from './detected-worktree-scan-cache'
@@ -49,6 +50,7 @@ export async function listDetectedWorktreesForCapturedRepo(
   try {
     let gitWorktrees: GitWorktreeInfo[]
     let freshScan = true
+    let safeToAuthorize = true
     let sideEffectToken: DetectedWorktreeSideEffectToken | undefined
     let metadataPrune: DetectedWorktreeMetadataPrune | undefined
     if (isFolderRepo(repo)) {
@@ -100,6 +102,7 @@ export async function listDetectedWorktreesForCapturedRepo(
       const scan = await listDetectedGitWorktrees(store, repo)
       gitWorktrees = scan.gitWorktrees
       freshScan = scan.fresh
+      safeToAuthorize = scan.safeToAuthorize
       sideEffectToken = scan.sideEffectToken
       metadataPrune = scan.metadataPrune
     }
@@ -132,6 +135,10 @@ export async function listDetectedWorktreesForCapturedRepo(
       if (!isCurrent()) {
         return null
       }
+    } else if (safeToAuthorize) {
+      // Cached scans are not authoritative for pruning, but their unchanged
+      // routing still proves these roots and can repair an invalidated auth map.
+      rememberLocalWorktreeRoots(store, repo, gitWorktrees)
     }
     loggedWorktreeListFailures.delete(`${repo.id}:${repo.path}`)
     return {

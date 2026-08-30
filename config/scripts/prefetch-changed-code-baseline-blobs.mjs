@@ -11,6 +11,7 @@ function runGit(root, args, options = {}) {
     cwd: root,
     encoding: options.encoding ?? 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    ...(options.input ? { input: options.input } : {}),
     ...(options.stdio ? { stdio: options.stdio } : {})
   })
 }
@@ -49,9 +50,21 @@ export function prefetchChangedCodeBaselineBlobs(root, baseline, sourceUrl, { gi
   }
   const objectIds = collectChangedSourceBlobOids(root, baseline, git)
   for (const chunk of chunkObjectIds(objectIds)) {
-    git(root, ['fetch', '--no-tags', '--no-write-fetch-head', sourceUrl, ...chunk], {
-      stdio: 'inherit'
+    // Why: GitHub intermittently rejects raw blob object ids passed to `git fetch`, even when
+    // every blob is reachable from the verified baseline. `cat-file --batch-check` uses Git's
+    // partial-clone promisor transport instead, while the exact object ids and blob types remain
+    // content-addressed and mechanically verified below.
+    const hydrated = git(root, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], {
+      input: `${chunk.join('\n')}\n`
     })
+    const hydratedLines = hydrated.trim().split('\n')
+    for (const [index, objectId] of chunk.entries()) {
+      if (hydratedLines[index] !== `${objectId} blob`) {
+        throw new Error(
+          `Failed to hydrate verified baseline blob ${objectId}: ${hydratedLines[index] ?? 'missing output'}`
+        )
+      }
+    }
   }
   console.log(`Prefetched ${objectIds.length} changed-source baseline blob(s).`)
   return objectIds.length

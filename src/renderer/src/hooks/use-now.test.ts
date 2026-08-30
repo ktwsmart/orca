@@ -1,5 +1,7 @@
+// @vitest-environment happy-dom
+import { act, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createSharedNowClock } from './useNow'
+import { createSharedNowClock, useNow } from './use-now'
 
 describe('createSharedNowClock', () => {
   afterEach(() => {
@@ -119,5 +121,43 @@ describe('createSharedNowClock', () => {
       'visibilitychange',
       documentListeners.get('visibilitychange')
     )
+  })
+})
+
+describe('useNow', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('does not tick or hold the shared timer open while disabled', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    const hook = renderHook(({ enabled }: { enabled: boolean }) => useNow(1_000, enabled), {
+      initialProps: { enabled: false }
+    })
+    expect(hook.result.current).toBe(1_000)
+
+    // A disabled caller must not arm the shared interval on its own.
+    act(() => vi.advanceTimersByTime(5_000))
+    expect(hook.result.current).toBe(1_000)
+
+    vi.setSystemTime(6_000)
+    hook.rerender({ enabled: true })
+    expect(hook.result.current).toBe(6_000)
+
+    act(() => vi.advanceTimersByTime(1_000))
+    expect(hook.result.current).toBe(7_000)
+  })
+
+  it('shares one snapshot across callers at the same cadence', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    const first = renderHook(() => useNow(2_000))
+    const second = renderHook(() => useNow(2_000))
+    expect(second.result.current).toBe(first.result.current)
+
+    act(() => vi.advanceTimersByTime(2_000))
+    expect(first.result.current).toBe(3_000)
+    expect(second.result.current).toBe(3_000)
   })
 })
