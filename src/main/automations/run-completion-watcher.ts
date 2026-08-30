@@ -2,6 +2,7 @@ import {
   isFinalAutomationRunStatus,
   type AutomationDispatchResult,
   type AutomationRun,
+  type AutomationRunCompletionAuthority,
   type AutomationRunOutputSnapshot
 } from '../../shared/automations-types'
 import { RetainedRunReconciler } from './retained-run-reconciliation'
@@ -18,7 +19,7 @@ export type AutomationRunTerminalObserver = {
   resolveRunTerminal: (run: AutomationRun) => string | null
   observeCompletion: (
     handle: string,
-    options: { signal: AbortSignal }
+    options: { signal: AbortSignal; completionAuthority: AutomationRunCompletionAuthority }
   ) => Promise<AutomationRunCompletionObservation>
 }
 
@@ -115,7 +116,13 @@ export class AutomationRunCompletionWatcher {
   ): Promise<void> {
     let observation: AutomationRunCompletionObservation
     try {
-      observation = await this.observer.observeCompletion(handle, { signal: controller.signal })
+      observation = await this.observer.observeCompletion(handle, {
+        signal: controller.signal,
+        // Old runs and old renderers never persisted this field. Agent-status is
+        // the only safe fallback because it does not assume an interactive TUI
+        // owns a disposable process.
+        completionAuthority: run.completionAuthority ?? 'agent-status'
+      })
     } catch (error) {
       if (controller.signal.aborted) {
         return

@@ -152,6 +152,10 @@ export type AutomationRun = {
    *  run reopening must target the pane that actually executed the run. */
   terminalPaneKey: string | null
   terminalPtyId: string | null
+  /** Completion authority selected by the launch plan for this exact run.
+   *  Missing on older records and runtimes; consumers must fail safe to
+   *  agent-status rather than assuming the process is disposable. */
+  completionAuthority?: AutomationRunCompletionAuthority
   outputSnapshot: AutomationRunOutputSnapshot | null
   precheckResult: AutomationPrecheckResult | null
   usage: AutomationRunUsage | null
@@ -231,11 +235,14 @@ export type AutomationDispatchResult = {
   terminalSessionId?: string | null
   terminalPaneKey?: string | null
   terminalPtyId?: string | null
+  completionAuthority?: AutomationRunCompletionAuthority
   outputSnapshot?: AutomationRunOutputSnapshot | null
   precheckResult?: AutomationPrecheckResult | null
   usage?: AutomationRunUsage | null
   error?: string | null
 }
+
+export type AutomationRunCompletionAuthority = 'agent-status' | 'process-exit'
 
 export type ExternalAutomationProvider = 'hermes' | 'openclaw'
 export type ExternalAutomationManagerStatus = 'available' | 'unavailable'

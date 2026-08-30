@@ -749,6 +749,7 @@ describe('Store', () => {
       terminalSessionId: 'tab-1',
       terminalPaneKey: paneKey,
       terminalPtyId: 'pty-run',
+      completionAuthority: 'process-exit',
       outputSnapshot: {
         format: 'plain_text',
         content: 'Run finished',
@@ -773,7 +774,11 @@ describe('Store', () => {
     expect(persisted).toMatchObject({
       terminalSessionId: 'tab-1',
       terminalPaneKey: paneKey,
-      terminalPtyId: 'pty-run'
+      terminalPtyId: 'pty-run',
+      completionAuthority: 'process-exit'
     })
+
+    const reloaded = await createStore()
+    expect(reloaded.listAutomationRuns(automation.id)[0].completionAuthority).toBe('process-exit')
   })
 })

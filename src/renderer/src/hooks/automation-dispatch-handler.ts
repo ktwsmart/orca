@@ -152,6 +152,7 @@ export async function handleAutomationDispatchRequest({
                 terminalSessionId: reusableSession.tabId,
                 terminalPaneKey: reusableSession.paneKey,
                 terminalPtyId: reusableSession.ptyId,
+                completionAuthority: 'agent-status',
                 precheckResult: resolved.context.precheckResult,
                 error: null
               })
@@ -211,6 +212,7 @@ export async function handleAutomationDispatchRequest({
         terminalSessionId: launchedTabId,
         terminalPaneKey: result.paneKey,
         terminalPtyId: result.ptyId,
+        completionAuthority,
         precheckResult: resolved.context.precheckResult,
         error: null
       })

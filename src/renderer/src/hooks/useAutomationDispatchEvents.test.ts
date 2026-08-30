@@ -19,6 +19,22 @@ const mockReleaseTerminalOwnership = vi.fn()
 const mockSshNeedsPassphrasePrompt = vi.fn()
 const mockSshGetState = vi.fn()
 const mockSshConnect = vi.fn()
+
+function makeLaunchResult(overrides: Record<string, unknown> = {}) {
+  return {
+    tabId: 'agent-tab',
+    paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
+    ptyId: 'agent-pty',
+    startupPlan: {},
+    completionAuthority: 'agent-status',
+    terminalOwnership: {
+      finalize: mockFinalizeTerminalOwnership,
+      release: mockReleaseTerminalOwnership
+    },
+    ...overrides
+  }
+}
+
 let latestStoreSubscriber: (() => void) | null = null
 const mockStoreSubscribe = vi.fn((listener: () => void) => {
   latestStoreSubscriber = listener
@@ -204,16 +220,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
     state.getKnownWorktreeById.mockReturnValue(undefined)
     mockCreateWorktree.mockResolvedValue({ worktree: createdWorktree, setup: setupLaunch })
     mockLaunchWorktreeBackgroundTerminals.mockResolvedValue(undefined)
-    mockLaunchAgentBackgroundSession.mockResolvedValue({
-      tabId: 'agent-tab',
-      paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-      ptyId: 'agent-pty',
-      startupPlan: {},
-      terminalOwnership: {
-        finalize: mockFinalizeTerminalOwnership,
-        release: mockReleaseTerminalOwnership
-      }
-    })
+    mockLaunchAgentBackgroundSession.mockResolvedValue(makeLaunchResult())
     mockOnDispatchRequested.mockReturnValue(() => {})
     mockSshNeedsPassphrasePrompt.mockResolvedValue(false)
     mockSshGetState.mockResolvedValue({ status: 'connected' })
@@ -262,7 +269,11 @@ describe('useAutomationDispatchEvents setup launch', () => {
     )
     mockLaunchAgentBackgroundSession.mockImplementation(async () => {
       order.push('agent')
-      return { tabId: 'agent-tab', ptyId: 'agent-pty', startupPlan: {} }
+      return makeLaunchResult({
+        paneKey: undefined,
+        completionAuthority: undefined,
+        terminalOwnership: undefined
+      })
     })
 
     await registerAndDispatch()
@@ -293,7 +304,38 @@ describe('useAutomationDispatchEvents setup launch', () => {
         runId: 'run-1',
         status: 'dispatched',
         workspaceId: 'wt-created',
-        terminalSessionId: 'agent-tab'
+        terminalSessionId: 'agent-tab',
+        completionAuthority: 'agent-status'
+      })
+    )
+  })
+
+  it('fails safe to agent-status when an older launch adapter omits authority', async () => {
+    mockLaunchAgentBackgroundSession.mockResolvedValue(
+      makeLaunchResult({ completionAuthority: undefined, terminalOwnership: null })
+    )
+
+    await registerAndDispatch()
+
+    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'dispatched',
+        completionAuthority: 'agent-status'
+      })
+    )
+  })
+
+  it('persists process-exit only when the actual launch plan selected it', async () => {
+    mockLaunchAgentBackgroundSession.mockResolvedValue(
+      makeLaunchResult({ completionAuthority: 'process-exit', terminalOwnership: null })
+    )
+
+    await registerAndDispatch()
+
+    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'dispatched',
+        completionAuthority: 'process-exit'
       })
     )
   })
@@ -558,16 +600,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
     })
     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
       launchArgs = args
-      return {
-        tabId: 'agent-tab',
-        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-        ptyId: 'agent-pty',
-        startupPlan: {},
-        terminalOwnership: {
-          finalize: mockFinalizeTerminalOwnership,
-          release: mockReleaseTerminalOwnership
-        }
-      }
+      return makeLaunchResult()
     })
 
     await registerAndDispatch()
@@ -598,16 +631,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
     } = {}
     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
       launchArgs = args
-      return {
-        tabId: 'agent-tab',
-        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-        ptyId: 'agent-pty',
-        startupPlan: {},
-        terminalOwnership: {
-          finalize: mockFinalizeTerminalOwnership,
-          release: mockReleaseTerminalOwnership
-        }
-      }
+      return makeLaunchResult()
     })
 
     await registerAndDispatch()
@@ -755,16 +779,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
     } = {}
     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
       launchArgs = args
-      return {
-        tabId: 'agent-tab',
-        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-        ptyId: 'agent-pty',
-        startupPlan: {},
-        terminalOwnership: {
-          finalize: mockFinalizeTerminalOwnership,
-          release: mockReleaseTerminalOwnership
-        }
-      }
+      return makeLaunchResult()
     })
 
     await registerAndDispatch()
@@ -785,16 +800,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
     let onExit: ((ptyId: string, code: number) => void) | undefined
     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
       onExit = args.onExit
-      return {
-        tabId: 'agent-tab',
-        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-        ptyId: 'agent-pty',
-        startupPlan: {},
-        terminalOwnership: {
-          finalize: mockFinalizeTerminalOwnership,
-          release: mockReleaseTerminalOwnership
-        }
-      }
+      return makeLaunchResult()
     })
 
     await registerAndDispatch()
@@ -826,16 +832,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
       .mockResolvedValueOnce(undefined)
     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
       args.onAgentStatus?.({ state: 'done' })
-      return {
-        tabId: 'agent-tab',
-        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-        ptyId: 'agent-pty',
-        startupPlan: {},
-        terminalOwnership: {
-          finalize: mockFinalizeTerminalOwnership,
-          release: mockReleaseTerminalOwnership
-        }
-      }
+      return makeLaunchResult()
     })
 
     await registerAndDispatch()
@@ -854,16 +851,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
     mockMarkDispatchResult.mockResolvedValueOnce(undefined).mockRejectedValueOnce(persistenceError)
     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
       onAgentStatus = args.onAgentStatus
-      return {
-        tabId: 'agent-tab',
-        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-        ptyId: 'agent-pty',
-        startupPlan: {},
-        terminalOwnership: {
-          finalize: mockFinalizeTerminalOwnership,
-          release: mockReleaseTerminalOwnership
-        }
-      }
+      return makeLaunchResult()
     })
 
     await registerAndDispatch()

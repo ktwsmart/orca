@@ -86,7 +86,10 @@ function observe(runtime: AutomationRunTerminalHost) {
   const errors: unknown[] = []
   const observer = createRuntimeAutomationRunTerminalObserver(runtime)
   const promise = observer
-    .observeCompletion(HANDLE, { signal: controller.signal })
+    .observeCompletion(HANDLE, {
+      signal: controller.signal,
+      completionAuthority: 'agent-status'
+    })
     .then((observation) => {
       settled.push(observation)
     })
@@ -121,6 +124,112 @@ describe('createRuntimeAutomationRunTerminalObserver', () => {
     await vi.advanceTimersByTimeAsync(1_000)
     expect(run.settled[0]?.status).toBe('completed')
     await run.promise
+  })
+
+  it('keeps a one-shot run open until its process exits with code zero', async () => {
+    let resolveExit:
+      | ((value: { satisfied: boolean; status: string; exitCode: number | null }) => void)
+      | null = null
+    const runtime: AutomationRunTerminalHost = {
+      getTerminalHandleForPaneKey: () => HANDLE,
+      readTerminal: async () => ({ tail: ['one-shot output'] }),
+      waitForTerminal: (_handle, options) => {
+        expect(options?.condition).toBe('exit')
+        return new Promise((resolve) => {
+          resolveExit = resolve
+        })
+      }
+    }
+    const controller = new AbortController()
+    const promise = createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(HANDLE, {
+      signal: controller.signal,
+      completionAuthority: 'process-exit'
+    })
+    await Promise.resolve()
+    let settled = false
+    void promise.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    resolveExit!({ satisfied: true, status: 'exited', exitCode: 0 })
+    await expect(promise).resolves.toMatchObject({ status: 'completed', error: null })
+  })
+
+  it('fails a one-shot run when its process exits non-zero', async () => {
+    const runtime: AutomationRunTerminalHost = {
+      getTerminalHandleForPaneKey: () => HANDLE,
+      readTerminal: async () => ({ tail: ['quota reached'] }),
+      waitForTerminal: async (_handle, options) => {
+        expect(options?.condition).toBe('exit')
+        return { satisfied: true, status: 'exited', exitCode: 9 }
+      }
+    }
+    const controller = new AbortController()
+    const result = await createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(
+      HANDLE,
+      { signal: controller.signal, completionAuthority: 'process-exit' }
+    )
+    expect(result.status).toBe('dispatch_failed')
+    expect(result.error).toContain('code 9')
+    expect(result.outputSnapshot?.content).toContain('quota reached')
+  })
+
+  it('fails closed when a one-shot exit has no verified exit code', async () => {
+    const runtime: AutomationRunTerminalHost = {
+      getTerminalHandleForPaneKey: () => HANDLE,
+      readTerminal: async () => ({ tail: ['transport disappeared'] }),
+      waitForTerminal: async () => ({ satisfied: true, status: 'exited', exitCode: null })
+    }
+    const controller = new AbortController()
+    const result = await createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(
+      HANDLE,
+      { signal: controller.signal, completionAuthority: 'process-exit' }
+    )
+    expect(result.status).toBe('dispatch_failed')
+    expect(result.error).toContain('without a verified exit code')
+  })
+
+  it('fails truthfully after the one-shot process exit deadline', async () => {
+    const runtime: AutomationRunTerminalHost = {
+      getTerminalHandleForPaneKey: () => HANDLE,
+      readTerminal: async () => ({ tail: ['still running'] }),
+      waitForTerminal: (_handle, options) =>
+        new Promise((_resolve, reject) => {
+          setTimeout(() => reject(new Error('timeout')), options?.timeoutMs ?? 0)
+        })
+    }
+    const controller = new AbortController()
+    const promise = createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(HANDLE, {
+      signal: controller.signal,
+      completionAuthority: 'process-exit'
+    })
+    await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000)
+    await expect(promise).resolves.toMatchObject({
+      status: 'dispatch_failed',
+      error: expect.stringContaining('after 6h')
+    })
+  })
+
+  it('propagates an abort without inventing a terminal run state', async () => {
+    const runtime: AutomationRunTerminalHost = {
+      getTerminalHandleForPaneKey: () => HANDLE,
+      readTerminal: async () => ({ tail: [] }),
+      waitForTerminal: (_handle, options) =>
+        new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(new Error('request_aborted')), {
+            once: true
+          })
+        })
+    }
+    const controller = new AbortController()
+    const promise = createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(HANDLE, {
+      signal: controller.signal,
+      completionAuthority: 'process-exit'
+    })
+    controller.abort()
+    await expect(promise).rejects.toThrow('request_aborted')
   })
 
   it('does not complete from a stale idle pane title (leaf branch shape)', async () => {
