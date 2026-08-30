@@ -28,6 +28,7 @@ const mockPasteDraftWhenAgentReady = vi.fn()
 const mockMarkTrusted = vi.fn()
 const mockDispatchEvent = vi.fn()
 const mockGetAgentLaunchPlatformForRepo = vi.fn<() => NodeJS.Platform>()
+const mockGetClientLoginShell = vi.fn(() => '/bin/zsh')
 const state = createAgentBackgroundSessionTestState({
   createTab: mockCreateTab,
   setTabCustomTitle: mockSetTabCustomTitle,
@@ -36,6 +37,7 @@ const state = createAgentBackgroundSessionTestState({
   setTabLayout: mockSetTabLayout,
   registerAgentLaunchConfig: mockRegisterAgentLaunchConfig
 })
+
 let currentStoreState = state
 
 vi.mock('@/store', () => ({
@@ -44,6 +46,8 @@ vi.mock('@/store', () => ({
     subscribe: vi.fn(() => () => {})
   }
 }))
+
+vi.mock('@/lib/client-login-shell', () => ({ getClientLoginShell: mockGetClientLoginShell }))
 
 vi.mock('@/lib/telemetry', () => ({
   track: vi.fn(),
@@ -69,6 +73,7 @@ vi.mock('@/components/terminal-pane/pty-data-sidecar-subscriptions', () => ({
 
 describe('launchAgentBackgroundSession', () => {
   beforeEach(() => {
+    mockGetClientLoginShell.mockReturnValue('/bin/zsh')
     currentStoreState = state
     resetAgentBackgroundSessionTestHarness({
       state,
@@ -88,6 +93,46 @@ describe('launchAgentBackgroundSession', () => {
       spawn: mockSpawn,
       write: mockWrite
     })
+  })
+
+  it('launches Antigravity automation as native one-shot and makes process exit authoritative', async () => {
+    Object.assign(state.settings, {
+      agentDefaultArgs: { antigravity: '--model claude-sonnet-4-6 --print-timeout 10m' }
+    })
+    const { launchAgentBackgroundSession } = await import('./launch-agent-background-session')
+
+    const result = await launchAgentBackgroundSession({
+      agent: 'antigravity',
+      worktreeId: 'wt-1',
+      prompt: 'run the audit',
+      oneShot: true
+    })
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.stringMatching(
+          /^agy '--model' 'claude-sonnet-4-6' '--print-timeout' '10m' --prompt 'run the audit'; orca_status=\$\?; exit "\$orca_status"$/
+        )
+      })
+    )
+    expect(result?.completionAuthority).toBe('process-exit')
+  })
+
+  it('forces a final Cursor print flag for one-shot automation', async () => {
+    Object.assign(state.settings, { agentDefaultArgs: { cursor: '--trust --model grok' } })
+    const { launchAgentBackgroundSession } = await import('./launch-agent-background-session')
+
+    const result = await launchAgentBackgroundSession({
+      agent: 'cursor',
+      worktreeId: 'wt-1',
+      prompt: 'run the audit',
+      oneShot: true
+    })
+
+    const command = mockSpawn.mock.calls[0]?.[0]?.command as string
+    expect(command).toContain("cursor-agent '--trust' '--model' 'grok' '--print' 'run the audit'")
+    expect(command.match(/'--print'/g)).toHaveLength(1)
+    expect(result?.completionAuthority).toBe('process-exit')
   })
 
   it('spawns a PTY first and creates the inactive tab already bound to it', async () => {

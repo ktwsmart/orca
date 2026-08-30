@@ -1,9 +1,9 @@
 import { useAppStore } from '@/store'
-import { buildAgentStartupPlan } from '@/lib/tui-agent-startup'
 import type {
   LaunchAgentBackgroundSessionArgs,
   LaunchAgentBackgroundSessionResult
 } from '@/lib/agent-background-session-contract'
+import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
 import { tuiAgentToAgentKind } from '@/lib/telemetry'
 import { scheduleAgentBackgroundDraft } from '@/lib/agent-background-draft-delivery'
 import { requestBackgroundTerminalWorktreeMount } from '@/components/terminal/background-terminal-worktree-mount'
@@ -31,7 +31,6 @@ import {
 import { createSshBackgroundStartupDelivery } from '@/lib/ssh-background-startup-delivery'
 import { shouldUseShellReadyStartupDelivery } from '../../../shared/codex-startup-delivery'
 import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-pane/terminal-side-effect-facts-handler'
-import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
 import { runBestEffortAgentBackgroundCleanups } from '@/lib/agent-background-session-cleanup'
 import type { bindAutomationTerminal } from '@/lib/automation-terminal-ownership'
 import {
@@ -53,7 +52,7 @@ export async function launchAgentBackgroundSession(
     throw new Error('The target workspace is no longer available.')
   }
   const cmdOverrides = store.settings?.agentCmdOverrides ?? {}
-  const agentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
+  const defaultAgentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
   const agentEnv = resolveTuiAgentLaunchEnv(agent, store.settings?.agentDefaultEnv)
   // Folder launch ownership cannot be derived from a repo row (#2989).
   const launchHost = resolveAgentBackgroundLaunchHost({
@@ -62,6 +61,9 @@ export async function launchAgentBackgroundSession(
     worktreePath: worktree.path,
     repo
   })
+  const runtimeTarget = getActiveRuntimeTarget(
+    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
+  )
   const preflight = TUI_AGENT_CONFIG[agent].preflightTrust
   if (preflight && worktree.path && window.api.agentTrust?.markTrusted) {
     try {
@@ -74,31 +76,22 @@ export async function launchAgentBackgroundSession(
       // Best-effort: the user can still accept the trust prompt.
     }
   }
-  const { platform: launchPlatform, isRemote } = launchHost
-  const startupShell = resolveLocalWindowsAgentStartupShell({
-    platform: launchPlatform,
-    isRemote,
-    terminalWindowsShell: store.settings?.terminalWindowsShell
-  })
-  const trimmedPrompt = prompt?.trim() ?? ''
-  const hasPrompt = trimmedPrompt.length > 0
-  const isFollowupPath = TUI_AGENT_CONFIG[agent].promptInjectionMode === 'stdin-after-start'
-
-  const pasteDraftAfterLaunch = hasPrompt && isFollowupPath ? trimmedPrompt : null
-  const startupPlan = buildAgentStartupPlan({
+  const startup = buildAutomationBackgroundStartup({
     agent,
-    prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',
+    prompt,
     cmdOverrides,
-    agentArgs,
+    agentArgs: defaultAgentArgs,
     agentEnv,
-    platform: launchPlatform,
-    shell: startupShell,
-    isRemote,
-    allowEmptyPromptLaunch: !hasPrompt || isFollowupPath
+    launchHost,
+    runtimeKind: runtimeTarget.kind,
+    worktreePath: worktree.path,
+    terminalWindowsShell: store.settings?.terminalWindowsShell,
+    oneShotRequested: args.oneShot
   })
-  if (!startupPlan) {
+  if (!startup) {
     return null
   }
+  const startupPlan = startup.plan
 
   // A hidden run tab must never be store-visible without its PTY (#2989).
   const { reservedTabId, leafId, launchToken, launchRegistration, paneEnv } =
@@ -122,9 +115,6 @@ export async function launchAgentBackgroundSession(
     write: (ptyId, data) => window.api.pty.write(ptyId, data)
   })
   // Route by the worktree's owner host, not the focused runtime.
-  const runtimeTarget = getActiveRuntimeTarget(
-    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
-  )
   let ptyId = '',
     runtimeTerminalHandle: string | null = null
   let returnedLaunchConfig: typeof startupPlan.launchConfig | undefined
@@ -179,7 +169,9 @@ export async function launchAgentBackgroundSession(
         tabId: reservedTabId,
         leafId,
         agent,
-        ...(hasPrompt && !isFollowupPath ? { prompt: trimmedPrompt } : {}),
+        ...(startup.hasPrompt && !startup.isFollowupPath && !startup.oneShot.enabled
+          ? { prompt: startup.trimmedPrompt }
+          : {}),
         ...(startupPlan.sessionOptions ? { sessionOptions: startupPlan.sessionOptions } : {}),
         legacy: {
           command: startupPlan.launchCommand,
@@ -244,14 +236,14 @@ export async function launchAgentBackgroundSession(
     tab = adopted.tab
     paneKey = adopted.paneKey
     terminalOwnership = adopted.terminalOwnership
-    if (agent === 'command-code' && hasPrompt && !isFollowupPath) {
+    if (agent === 'command-code' && startup.hasPrompt && !startup.isFollowupPath) {
       // Why: Command Code does not expose a prompt-start hook; seed working for
       // hidden prompt launches so sidebar/activity surfaces do not stay idle.
       const routing = agentStatusConsumer.resolveRouting()
       if (routing) {
         store.setAgentStatus(
           paneKey,
-          { state: 'working', prompt: trimmedPrompt, agentType: agent },
+          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent },
           undefined,
           undefined,
           routing,
@@ -292,11 +284,18 @@ export async function launchAgentBackgroundSession(
     // can double-spawn, while later tracking can miss user takeover.
     requestBackgroundTerminalWorktreeMount({ worktreeId, tabIds: [tab.id] })
 
-    if (pasteDraftAfterLaunch !== null) {
-      scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
+    if (startup.pasteDraftAfterLaunch !== null) {
+      scheduleAgentBackgroundDraft(tab.id, startup.pasteDraftAfterLaunch, agent)
     }
 
-    return { tabId: tab.id, paneKey, ptyId, startupPlan, terminalOwnership }
+    return {
+      tabId: tab.id,
+      paneKey,
+      ptyId,
+      startupPlan,
+      terminalOwnership,
+      completionAuthority: startup.completionAuthority
+    }
   } catch (error) {
     // Why: terminal creation and stream subscription are separate remote calls.
     // A failure between them must not strand an invisible runtime terminal.

@@ -13,6 +13,8 @@ export type LaunchAgentBackgroundSessionArgs = {
   onData?: (chunk: string) => void
   onExit?: (ptyId: string, code: number) => void
   onAgentStatus?: (payload: ParsedAgentStatusPayload) => void
+  /** Automation-only native one-shot launch; interactive/reuse sessions omit this. */
+  oneShot?: boolean
 }
 
 export type LaunchAgentBackgroundSessionResult = {
@@ -21,4 +23,5 @@ export type LaunchAgentBackgroundSessionResult = {
   ptyId: string
   startupPlan: AgentStartupPlan
   terminalOwnership: AutomationTerminalOwnership | null
+  completionAuthority: 'agent-status' | 'process-exit'
 }
