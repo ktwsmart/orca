@@ -14,6 +14,7 @@ import { listVisibleFolderWorkspaces } from './folder-workspace-catalog'
 import {
   applyFreshDetectedWorktreeScanSideEffects,
   listDetectedGitWorktrees,
+  rememberLocalWorktreeRoots,
   type DetectedWorktreeMetadataPrune,
   type DetectedWorktreeSideEffectToken
 } from './detected-worktree-scan-cache'
@@ -89,6 +90,7 @@ export function registerWorktreeCatalogHandlers(context: WorktreeIpcContext): vo
       try {
         let gitWorktrees
         let freshScan = true
+        let safeToAuthorize = true
         let sideEffectToken: DetectedWorktreeSideEffectToken | undefined
         let metadataPrune: DetectedWorktreeMetadataPrune | undefined
         if (isFolderRepo(repo)) {
@@ -119,6 +121,7 @@ export function registerWorktreeCatalogHandlers(context: WorktreeIpcContext): vo
           const scan = await listDetectedGitWorktrees(store, repo)
           gitWorktrees = scan.gitWorktrees
           freshScan = scan.fresh
+          safeToAuthorize = scan.safeToAuthorize
           sideEffectToken = scan.sideEffectToken
           metadataPrune = scan.metadataPrune
         }
@@ -132,6 +135,8 @@ export function registerWorktreeCatalogHandlers(context: WorktreeIpcContext): vo
               sideEffectToken
             }
           )
+        } else if (safeToAuthorize) {
+          rememberLocalWorktreeRoots(store, repo, gitWorktrees)
         }
         loggedWorktreeListFailures.delete(`${repo.id}:${repo.path}`)
         const metadata = metadataForRepo(repo)
@@ -181,6 +186,7 @@ export function registerWorktreeCatalogHandlers(context: WorktreeIpcContext): vo
     try {
       let gitWorktrees
       let freshScan = true
+      let safeToAuthorize = true
       let sideEffectToken: DetectedWorktreeSideEffectToken | undefined
       let metadataPrune: DetectedWorktreeMetadataPrune | undefined
       if (isFolderRepo(repo)) {
@@ -211,6 +217,7 @@ export function registerWorktreeCatalogHandlers(context: WorktreeIpcContext): vo
         const scan = await listDetectedGitWorktrees(store, repo)
         gitWorktrees = scan.gitWorktrees
         freshScan = scan.fresh
+        safeToAuthorize = scan.safeToAuthorize
         sideEffectToken = scan.sideEffectToken
         metadataPrune = scan.metadataPrune
       }
@@ -218,6 +225,8 @@ export function registerWorktreeCatalogHandlers(context: WorktreeIpcContext): vo
         await applyFreshDetectedWorktreeScanSideEffects(store, repo, gitWorktrees, metadataPrune, {
           sideEffectToken
         })
+      } else if (safeToAuthorize) {
+        rememberLocalWorktreeRoots(store, repo, gitWorktrees)
       }
       loggedWorktreeListFailures.delete(`${repo.id}:${repo.path}`)
       const metadata = allMeta ?? readAllWorktreeMetaForHost(store, getRepoExecutionHostId(repo))

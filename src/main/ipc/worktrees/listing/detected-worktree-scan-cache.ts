@@ -45,6 +45,9 @@ export type DetectedWorktreeMetadataPrune = Readonly<{
 export type DetectedWorktreeScanResult = {
   gitWorktrees: GitWorktreeInfo[]
   fresh: boolean
+  /** A cached or coalesced scan can still safely restore authorization without
+   *  replaying destructive metadata/lineage pruning. */
+  safeToAuthorize: boolean
   sideEffectToken?: DetectedWorktreeSideEffectToken
   metadataPrune?: DetectedWorktreeMetadataPrune
 }
@@ -100,19 +103,37 @@ export async function listDetectedGitWorktrees(
   if (repo.connectionId || isFolderRepo(repo)) {
     return {
       gitWorktrees: await listRepoWorktrees(repo, localWorktreeGitOptions),
-      fresh: true
+      fresh: true,
+      safeToAuthorize: true
     }
   }
 
   const cacheKey = getDetectedWorktreeScanCacheKey(repo.id, localWorktreeGitOptions)
   const cached = detectedWorktreeScanCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) {
-    return { gitWorktrees: cached.worktrees, fresh: false }
+    return { gitWorktrees: cached.worktrees, fresh: false, safeToAuthorize: true }
   }
 
   const inFlight = detectedWorktreeScanInFlight.get(cacheKey)
   if (inFlight) {
-    return { gitWorktrees: await inFlight.promise, fresh: false }
+    const gitWorktrees = await inFlight.promise
+    const routingUnchanged =
+      getDetectedWorktreeScanCacheKey(repo.id, getLocalProjectWorktreeGitOptions(store, repo)) ===
+      cacheKey
+    const fresh =
+      !inFlight.invalidated &&
+      routingUnchanged &&
+      isLocalWorktreeScanGenerationCurrent(repo.id, inFlight.sideEffectToken.generation)
+    // Why: the caller that started this scan may have gone stale. A current
+    // follower must receive the same attested side-effect token so it can seed
+    // authorization and perform the once-per-scan pruning safely.
+    return {
+      gitWorktrees,
+      fresh,
+      safeToAuthorize: fresh,
+      ...(fresh ? { sideEffectToken: inFlight.sideEffectToken } : {}),
+      ...(fresh && inFlight.metadataPrune ? { metadataPrune: inFlight.metadataPrune } : {})
+    }
   }
 
   // Why: capture before invoking Git because listing can mutate synchronously before its first await.
@@ -153,6 +174,7 @@ export async function listDetectedGitWorktrees(
     return {
       gitWorktrees,
       fresh,
+      safeToAuthorize: fresh,
       ...(fresh ? { sideEffectToken: scan.sideEffectToken } : {}),
       ...(fresh && scan.metadataPrune ? { metadataPrune: scan.metadataPrune } : {})
     }
