@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url'
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/
 const SHA256_PATTERN = /^[0-9a-f]{64}$/
+const ZERO_SHA = '0'.repeat(40)
 
 function fail(message) {
   throw new Error(`KTW release overlay invalid: ${message}`)
@@ -48,6 +49,9 @@ export function validateOverlayManifest(value) {
   if (!SHA_PATTERN.test(value.outputTreeSha ?? '')) {
     fail('outputTreeSha must be a full SHA-1')
   }
+  if (value.patchApplyMode !== undefined && value.patchApplyMode !== 'unidiff-zero') {
+    fail('unsupported patchApplyMode')
+  }
   assertStringArray(value.sourceCommits, 'sourceCommits', SHA_PATTERN)
   assertStringArray(value.allowedPaths, 'allowedPaths')
   const sortedPaths = [...value.allowedPaths].sort()
@@ -73,6 +77,25 @@ export function extractPatchPaths(patchText) {
     fail('patch contains duplicate file sections')
   }
   return paths.sort()
+}
+
+export function extractFullIndexPreimages(patchText) {
+  const preimages = new Map()
+  const sections = patchText.split(/(?=^diff --git )/m).filter(Boolean)
+  for (const section of sections) {
+    const header = /^diff --git a\/([^\n]+) b\/([^\n]+)$/m.exec(section)
+    if (!header || header[1] !== header[2]) {
+      fail('zero-context patch contains an invalid file section')
+    }
+    const indexes = [
+      ...section.matchAll(/^index ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: [0-7]{6})?$/gm)
+    ]
+    if (indexes.length !== 1) {
+      fail(`zero-context patch needs one full-index line: ${header[1]}`)
+    }
+    preimages.set(header[1], indexes[0][1])
+  }
+  return preimages
 }
 
 function resolveContainedRegularFile(parent, child) {
@@ -118,6 +141,42 @@ function runGit(repoRoot, args, env = {}) {
   }).trim()
 }
 
+export function buildPatchApplyArgs(manifest, patchPath) {
+  return [
+    'apply',
+    '--cached',
+    '--3way',
+    ...(manifest.patchApplyMode === 'unidiff-zero' ? ['--unidiff-zero'] : []),
+    patchPath
+  ]
+}
+
+function verifyZeroContextPreimages(repoRoot, manifest, patchText, git) {
+  if (manifest.patchApplyMode !== 'unidiff-zero') {
+    return
+  }
+  const preimages = extractFullIndexPreimages(patchText)
+  if (preimages.size !== manifest.allowedPaths.length) {
+    fail('zero-context preimage paths differ from manifest')
+  }
+  for (const path of manifest.allowedPaths) {
+    const expected = preimages.get(path)
+    if (!expected) {
+      fail(`zero-context patch is missing a preimage: ${path}`)
+    }
+    const actual = git(repoRoot, [
+      'ls-tree',
+      '--format=%(objectname)',
+      manifest.officialBaseSha,
+      '--',
+      path
+    ])
+    if ((expected === ZERO_SHA && actual.length > 0) || (expected !== ZERO_SHA && actual !== expected)) {
+      fail(`zero-context preimage does not match official base: ${path}`)
+    }
+  }
+}
+
 export function verifyKtwReleaseOverlay(repoRoot, manifestPath, git = runGit) {
   const { manifest, patchPath, patchPaths } = verifyOverlayFiles(manifestPath)
   git(repoRoot, ['cat-file', '-e', `${manifest.officialBaseSha}^{commit}`])
@@ -130,13 +189,14 @@ export function verifyKtwReleaseOverlay(repoRoot, manifestPath, git = runGit) {
   if (basePackage.version !== manifest.officialVersion) {
     fail(`official base version is ${String(basePackage.version)}`)
   }
+  verifyZeroContextPreimages(repoRoot, manifest, readFileSync(patchPath, 'utf8'), git)
 
   const temporaryDirectory = mkdtempSync(resolve(tmpdir(), 'ktw-release-overlay-'))
   const indexFile = resolve(temporaryDirectory, 'index')
   const indexEnv = { GIT_INDEX_FILE: indexFile }
   try {
     git(repoRoot, ['read-tree', manifest.officialBaseSha], indexEnv)
-    git(repoRoot, ['apply', '--cached', '--3way', patchPath], indexEnv)
+    git(repoRoot, buildPatchApplyArgs(manifest, patchPath), indexEnv)
     if (git(repoRoot, ['ls-files', '-u'], indexEnv).length > 0) {
       fail('patch left unmerged index entries')
     }
