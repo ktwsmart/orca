@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
@@ -10,6 +11,15 @@ import {
 } from './verify-ktw-release-overlay.mjs'
 
 const MANIFEST_PATH = 'config/ktw-release-overlays/v1.4.192/manifest.json'
+const OFFICIAL_BASE_SHA = 'ce4df07736baa38d742613bd68d5a3d845f79d25'
+const HAS_OFFICIAL_BASE = (() => {
+  try {
+    execFileSync('git', ['cat-file', '-e', `${OFFICIAL_BASE_SHA}^{commit}`], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+})()
 
 describe('KTW release overlay verifier', () => {
   it('binds the checked-in patch hash and exact path allowlist', () => {
@@ -48,10 +58,16 @@ describe('KTW release overlay verifier', () => {
     ).toThrow('zero-context patch needs one full-index line')
   })
 
-  it('materializes the checked-in zero-context patch to the exact output tree', () => {
-    const result = verifyKtwReleaseOverlay(process.cwd(), MANIFEST_PATH)
-    expect(result.outputTreeSha).toBe('3b5777c6c7d29e09b52bd1d9e95b2da9164887f1')
-  })
+  // The required static-analysis job prefetches official objects and always runs this verifier.
+  // Unit shards use fetch-depth=1 without tags, so only this duplicate end-to-end assertion skips
+  // when the exact official base object is unavailable; the six pure contract tests still run.
+  it.skipIf(!HAS_OFFICIAL_BASE)(
+    'materializes the checked-in zero-context patch to the exact output tree',
+    () => {
+      const result = verifyKtwReleaseOverlay(process.cwd(), MANIFEST_PATH)
+      expect(result.outputTreeSha).toBe('3b5777c6c7d29e09b52bd1d9e95b2da9164887f1')
+    }
+  )
 
   it('rejects duplicate or unsorted allowed paths', () => {
     const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'))
