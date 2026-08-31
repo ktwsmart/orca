@@ -1,44 +1,25 @@
 diff --git a/src/main/automations/run-completion-watcher.test.ts b/src/main/automations/run-completion-watcher.test.ts
-index 31c1aea0bb..a632921e94 100644
+index 31c1aea0bb4719281929805f5022b85ce8fbe5f5..a632921e94507248d76cbed879076b3d3046a927 100644
 --- a/src/main/automations/run-completion-watcher.test.ts
 +++ b/src/main/automations/run-completion-watcher.test.ts
-@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs'
- import { join } from 'node:path'
- import { tmpdir } from 'node:os'
- import type { Repo } from '../../shared/repo-types'
+@@ -6 +6,5 @@ import type { Repo } from '../../shared/repo-types'
 -import type { Automation, AutomationRun } from '../../shared/automations-types'
 +import type {
 +  Automation,
 +  AutomationRun,
 +  AutomationRunCompletionAuthority
 +} from '../../shared/automations-types'
- import type { AutomationsChangedPayload } from '../../shared/runtime-client-events'
- import { AutomationService } from './service'
- import type {
-@@ -81,13 +85,17 @@ function readRun(store: TestStore, automationId: string, runId: string): Automat
- }
- 
- function createObserver(
+@@ -84 +88,4 @@ function createObserver(
 -  observe: (signal: AbortSignal) => Promise<AutomationRunCompletionObservation>,
 +  observe: (
 +    signal: AbortSignal,
 +    completionAuthority: AutomationRunCompletionAuthority
 +  ) => Promise<AutomationRunCompletionObservation>,
-   resolveRunTerminal: (run: AutomationRun) => string | null = (run) =>
-     run.terminalPaneKey ? 'handle-1' : null
- ): AutomationRunTerminalObserver {
-   return {
-     resolveRunTerminal,
+@@ -90 +97,2 @@ function createObserver(
 -    observeCompletion: (_handle, { signal }) => observe(signal)
 +    observeCompletion: (_handle, { signal, completionAuthority }) =>
 +      observe(signal, completionAuthority)
-   }
- }
- 
-@@ -119,6 +127,33 @@ describe('authority-owned automation run completion', () => {
-     service.stop()
-   })
- 
+@@ -121,0 +130,27 @@ describe('authority-owned automation run completion', () => {
 +  it('uses the persisted launch authority and fails old runs safe to agent-status', async () => {
 +    const store = await createStore()
 +    const automation = createAutomation(store)
@@ -66,34 +47,16 @@ index 31c1aea0bb..a632921e94 100644
 +    service.stop()
 +  })
 +
-   it('leaves a headless dispatched run alone when the authority cannot observe it', async () => {
-     const store = await createStore()
-     const automation = createAutomation(store)
 diff --git a/src/main/automations/run-completion-watcher.ts b/src/main/automations/run-completion-watcher.ts
-index 4ac125082f..21e5eb3449 100644
+index 4ac125082fbf5de992aeb6d4076b4a9387f8616d..21e5eb34493e3a251b97a9885bc3f6352c26247a 100644
 --- a/src/main/automations/run-completion-watcher.ts
 +++ b/src/main/automations/run-completion-watcher.ts
-@@ -2,6 +2,7 @@ import {
-   isFinalAutomationRunStatus,
-   type AutomationDispatchResult,
-   type AutomationRun,
+@@ -4,0 +5 @@ import {
 +  type AutomationRunCompletionAuthority,
-   type AutomationRunOutputSnapshot
- } from '../../shared/automations-types'
- import { RetainedRunReconciler } from './retained-run-reconciliation'
-@@ -18,7 +19,7 @@ export type AutomationRunTerminalObserver = {
-   resolveRunTerminal: (run: AutomationRun) => string | null
-   observeCompletion: (
-     handle: string,
+@@ -21 +22 @@ export type AutomationRunTerminalObserver = {
 -    options: { signal: AbortSignal }
 +    options: { signal: AbortSignal; completionAuthority: AutomationRunCompletionAuthority }
-   ) => Promise<AutomationRunCompletionObservation>
- }
- 
-@@ -115,7 +116,13 @@ export class AutomationRunCompletionWatcher {
-   ): Promise<void> {
-     let observation: AutomationRunCompletionObservation
-     try {
+@@ -118 +119,7 @@ export class AutomationRunCompletionWatcher {
 -      observation = await this.observer.observeCompletion(handle, { signal: controller.signal })
 +      observation = await this.observer.observeCompletion(handle, {
 +        signal: controller.signal,
@@ -102,29 +65,17 @@ index 4ac125082f..21e5eb3449 100644
 +        // owns a disposable process.
 +        completionAuthority: run.completionAuthority ?? 'agent-status'
 +      })
-     } catch (error) {
-       if (controller.signal.aborted) {
-         return
 diff --git a/src/main/automations/runtime-terminal-run-observer.test.ts b/src/main/automations/runtime-terminal-run-observer.test.ts
-index a9b307c329..b363b0a485 100644
+index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec8ee86a19 100644
 --- a/src/main/automations/runtime-terminal-run-observer.test.ts
 +++ b/src/main/automations/runtime-terminal-run-observer.test.ts
-@@ -86,7 +86,10 @@ function observe(runtime: AutomationRunTerminalHost) {
-   const errors: unknown[] = []
-   const observer = createRuntimeAutomationRunTerminalObserver(runtime)
-   const promise = observer
+@@ -89 +89,4 @@ function observe(runtime: AutomationRunTerminalHost) {
 -    .observeCompletion(HANDLE, { signal: controller.signal })
 +    .observeCompletion(HANDLE, {
 +      signal: controller.signal,
 +      completionAuthority: 'agent-status'
 +    })
-     .then((observation) => {
-       settled.push(observation)
-     })
-@@ -123,6 +126,112 @@ describe('createRuntimeAutomationRunTerminalObserver', () => {
-     await run.promise
-   })
- 
+@@ -125,0 +129,106 @@ describe('createRuntimeAutomationRunTerminalObserver', () => {
 +  it('keeps a one-shot run open until its process exits with code zero', async () => {
 +    let resolveExit:
 +      | ((value: { satisfied: boolean; status: string; exitCode: number | null }) => void)
@@ -231,17 +182,11 @@ index a9b307c329..b363b0a485 100644
 +    await expect(promise).rejects.toThrow('request_aborted')
 +  })
 +
-   it('does not complete from a stale idle pane title (leaf branch shape)', async () => {
-     const runtime = createFakeRuntime({ lastAgentStatus: null, paneTitle: '✳ Claude — idle' })
-     const run = observe(runtime)
 diff --git a/src/main/automations/runtime-terminal-run-observer.ts b/src/main/automations/runtime-terminal-run-observer.ts
-index 0dc6750e8d..e726a063ab 100644
+index 0dc6750e8de167a50c4152a884f13d41908603cb..e726a063ab383f1eace808ec4f49984528dd675e 100644
 --- a/src/main/automations/runtime-terminal-run-observer.ts
 +++ b/src/main/automations/runtime-terminal-run-observer.ts
-@@ -29,8 +29,13 @@ export type AutomationRunTerminalHost = {
-   getTerminalHandleForPaneKey(paneKey: string): string | null
-   waitForTerminal(
-     handle: string,
+@@ -32,2 +32,7 @@ export type AutomationRunTerminalHost = {
 -    options?: { condition?: 'tui-idle'; timeoutMs?: number; signal?: AbortSignal }
 -  ): Promise<{ satisfied: boolean; blockedReason?: string }>
 +    options?: { condition?: 'exit' | 'tui-idle'; timeoutMs?: number; signal?: AbortSignal }
@@ -251,13 +196,7 @@ index 0dc6750e8d..e726a063ab 100644
 +    exitCode?: number | null
 +    blockedReason?: string
 +  }>
-   readTerminal(handle: string, opts?: { limit?: number }): Promise<{ tail: string[] }>
- }
- 
-@@ -145,54 +150,101 @@ async function buildUnobservedObservation(
-   }
- }
- 
+@@ -147,0 +153,85 @@ async function buildUnobservedObservation(
 +async function observeProcessExit(
 +  runtime: AutomationRunTerminalHost,
 +  handle: string,
@@ -343,12 +282,7 @@ index 0dc6750e8d..e726a063ab 100644
 +  }
 +}
 +
- export function createRuntimeAutomationRunTerminalObserver(
-   runtime: AutomationRunTerminalHost
- ): AutomationRunTerminalObserver {
-   return {
-     resolveRunTerminal: (run) =>
-       run.terminalPaneKey ? runtime.getTerminalHandleForPaneKey(run.terminalPaneKey) : null,
+@@ -154,42 +244,4 @@ export function createRuntimeAutomationRunTerminalObserver(
 -    observeCompletion: async (handle, { signal }) => {
 -      const startedAt = Date.now()
 -      // Why: tui-idle is level-triggered, so a reused pane still idle from the
@@ -395,179 +329,1454 @@ index 0dc6750e8d..e726a063ab 100644
 +      return completionAuthority === 'process-exit'
 +        ? await observeProcessExit(runtime, handle, signal)
 +        : await observeAgentStatusCompletion(runtime, handle, signal)
-     }
-   }
- }
+diff --git a/src/main/index.ts b/src/main/index.ts
+index 39d27bada72edef3664d08f669b0ff98f17c1043..2bc9e153e9454584ca7812adf559b1581f546cf5 100644
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -3294,0 +3295 @@ void app.whenReady().then(async () => {
++      bindServices: bindTerminalRuntimeStartupServices,
+@@ -3300 +3300,0 @@ void app.whenReady().then(async () => {
+-    bindTerminalRuntimeStartupServices(desktopStartup.services)
+@@ -3316 +3316,2 @@ void app.whenReady().then(async () => {
+-    registerHeadlessPtyRuntime(
++    await localPtyProviderStartupReady
++    await registerHeadlessPtyRuntime(
+diff --git a/src/main/ipc/pty/register-headless-runtime.test.ts b/src/main/ipc/pty/register-headless-runtime.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7063ec2454d1d07dfbae8ac3d2fa72716d7dab62
+--- /dev/null
++++ b/src/main/ipc/pty/register-headless-runtime.test.ts
+@@ -0,0 +1,41 @@
++import { describe, expect, it, vi } from 'vitest'
++
++const { hydrateMock, registerHandlersMock } = vi.hoisted(() => ({
++  hydrateMock: vi.fn(),
++  registerHandlersMock: vi.fn()
++}))
++
++vi.mock('./register-handlers', () => ({
++  registerPtyHandlers: registerHandlersMock
++}))
++
++vi.mock('../../memory/hydrate-local-pty-registry', () => ({
++  hydrateLocalPtyRegistryAtBoot: hydrateMock
++}))
++
++import { registerHeadlessPtyRuntime } from './register-headless-runtime'
++
++describe('registerHeadlessPtyRuntime', () => {
++  it('registers handlers before awaiting registry hydration', async () => {
++    let resolveHydration!: () => void
++    const hydration = new Promise<void>((resolve) => {
++      resolveHydration = resolve
++    })
++    const events: string[] = []
++    registerHandlersMock.mockImplementation(() => events.push('handlers'))
++    hydrateMock.mockImplementation(() => {
++      events.push('hydrate')
++      return hydration
++    })
++    const store = {} as never
++
++    const ready = registerHeadlessPtyRuntime({} as never, undefined, undefined, undefined, store)
++
++    expect(events).toEqual(['handlers', 'hydrate'])
++    expect(registerHandlersMock).toHaveBeenCalledOnce()
++    expect(hydrateMock).toHaveBeenCalledWith(store)
++
++    resolveHydration()
++    await ready
++  })
++})
+diff --git a/src/main/ipc/pty/register-headless-runtime.ts b/src/main/ipc/pty/register-headless-runtime.ts
+index f380482a079f25fc83bb581955d0c9f3e47ce4c3..2212fbfac3a3bdd5418c1a9d2c78a4cbdf5e511c 100644
+--- a/src/main/ipc/pty/register-headless-runtime.ts
++++ b/src/main/ipc/pty/register-headless-runtime.ts
+@@ -11,0 +12 @@ import { registerPtyHandlers } from './register-handlers'
++import { hydrateLocalPtyRegistryAtBoot } from '../../memory/hydrate-local-pty-registry'
+@@ -24 +25 @@ export function registerHeadlessPtyRuntime(
+-): void {
++): Promise<void> {
+@@ -46,0 +48 @@ export function registerHeadlessPtyRuntime(
++  return store ? hydrateLocalPtyRegistryAtBoot(store) : Promise.resolve()
+diff --git a/src/main/memory/hydrate-local-pty-registry.test.ts b/src/main/memory/hydrate-local-pty-registry.test.ts
+index 7b9a90bfb7314cc6f7ed4fe2162b996af6a3a3b5..84c581c04e33682b52bb622b6bcf7ff053b57bc2 100644
+--- a/src/main/memory/hydrate-local-pty-registry.test.ts
++++ b/src/main/memory/hydrate-local-pty-registry.test.ts
+@@ -13,0 +14,2 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { resolveFolderWorkspaceHost } from '../../shared/folder-workspace-execution-host'
++import type { FolderWorkspace } from '../../shared/folder-workspace-types'
+@@ -14,0 +17 @@ import type { Repo } from '../../shared/repo-types'
++import type { WorktreeMeta } from '../../shared/worktree/meta-types'
+@@ -26 +28,0 @@ const LARGE_SESSION_COUNT = 150_000
+-
+@@ -34,0 +37,6 @@ vi.mock('../daemon/daemon-init', () => ({
++const getLocalProjectWorktreeGitOptionsMock = vi.fn()
++vi.mock('../project-runtime-git-options', () => ({
++  getLocalProjectWorktreeGitOptions: (store: unknown, repo: unknown) =>
++    getLocalProjectWorktreeGitOptionsMock(store, repo)
++}))
++
+@@ -36,3 +44,4 @@ vi.mock('../daemon/daemon-init', () => ({
+-// listRepoWorktrees(repo). The git I/O is out of scope for this unit; the mock
+-// also lets count tests prove repos without live sessions launch no Git work.
+-const listRepoWorktreesMock = vi.fn()
++// listLocalRepoWorktreesStrict(repo). The git I/O is out of scope for this
++// unit; the mock also lets count tests prove repos without live sessions
++// launch no Git work.
++const listLocalRepoWorktreesStrictMock = vi.fn()
+@@ -40 +49,4 @@ vi.mock('../repo-worktrees', () => ({
+-  listRepoWorktrees: (repo: unknown) => listRepoWorktreesMock(repo)
++  listLocalRepoWorktreesStrict: (
++    repo: unknown,
++    options?: { signal?: AbortSignal; wslDistro?: string }
++  ) => listLocalRepoWorktreesStrictMock(repo, options)
+@@ -43,6 +55 @@ vi.mock('../repo-worktrees', () => ({
+-// Why: hydrateLocalPtyRegistryAtBoot accepts `Pick<Store, 'getRepos'>` and
+-// the hydrator only reads `id` + `connectionId` off each Repo, but Repo's
+-// required fields (path, displayName, badgeColor, addedAt) still have to be
+-// present at the type level. Filling them with placeholder values keeps the
+-// test schema-compliant without coupling to anything the hydrator doesn't
+-// touch.
++// The runtime option helper accepts Store; mocks keep this fixture scoped to hydration reads.
+@@ -50,2 +57,9 @@ function makeStore(
+-  repos: { id: string; connectionId?: string | null }[] = []
+-): Pick<Store, 'getRepos'> {
++  repos: {
++    id: string
++    connectionId?: string | null
++    executionHostId?: Repo['executionHostId']
++    kind?: Repo['kind']
++    path?: string
++  }[] = [],
++  worktreeMeta: Record<string, WorktreeMeta> = {}
++): Store {
+@@ -54 +68 @@ function makeStore(
+-    path: `/tmp/${r.id}`,
++    path: r.path ?? `/tmp/${r.id}`,
+@@ -58 +72,3 @@ function makeStore(
+-    connectionId: r.connectionId ?? null
++    connectionId: r.connectionId ?? null,
++    executionHostId: r.executionHostId ?? null,
++    kind: r.kind
+@@ -60 +76,8 @@ function makeStore(
+-  return { getRepos: () => built }
++  return {
++    getRepos: () => built,
++    getAllWorktreeMeta: () => worktreeMeta,
++    getAllWorktreeMetaForHost: (hostId) =>
++      Object.fromEntries(
++        Object.entries(worktreeMeta).filter(([, meta]) => !meta.hostId || meta.hostId === hostId)
++      )
++  } as Store
+@@ -68,0 +92,6 @@ function makeProvider(sessions: SessionInfo[]): Pick<DaemonPtyAdapter, 'listSess
++function makeProviderGroup(adapters: Pick<DaemonPtyAdapter, 'listSessions'>[]): {
++  getAllAdapters: () => Pick<DaemonPtyAdapter, 'listSessions'>[]
++} {
++  return { getAllAdapters: () => adapters }
++}
++
+@@ -100,0 +130,2 @@ async function loadFresh(): Promise<{
++  deadlineMs: number
++  gitEnumerationConcurrency: number
+@@ -109,0 +141,2 @@ async function loadFresh(): Promise<{
++    deadlineMs: hydrateMod.LOCAL_PTY_REGISTRY_BOOT_HYDRATION_DEADLINE_MS,
++    gitEnumerationConcurrency: hydrateMod.LOCAL_PTY_REGISTRY_GIT_ENUMERATION_CONCURRENCY,
+@@ -119 +152,2 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockReset()
++    getLocalProjectWorktreeGitOptionsMock.mockReset().mockReturnValue({})
++    listLocalRepoWorktreesStrictMock.mockReset()
+@@ -129 +163 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    expect(listRepoWorktreesMock).not.toHaveBeenCalled()
++    expect(listLocalRepoWorktreesStrictMock).not.toHaveBeenCalled()
+@@ -136 +170 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockResolvedValue([])
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([])
+@@ -141 +175 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    expect(listRepoWorktreesMock).not.toHaveBeenCalled()
++    expect(listLocalRepoWorktreesStrictMock).not.toHaveBeenCalled()
+@@ -150 +184,3 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockResolvedValue([{ path: '/local/Triton', isMainWorktree: true }])
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
++      { path: '/local/Triton', isMainWorktree: true }
++    ])
+@@ -160 +196,228 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    expect(listRepoWorktreesMock).not.toHaveBeenCalled()
++    expect(listLocalRepoWorktreesStrictMock).not.toHaveBeenCalled()
++  })
++
++  it('coalesces concurrent calls onto one inventory attempt', async () => {
++    const { hydrate } = await loadFresh()
++    const inventory = createDeferred<SessionInfo[]>()
++    const provider = { listSessions: vi.fn(() => inventory.promise) }
++    getDaemonProviderMock.mockReturnValue(provider)
++
++    const first = hydrate(makeStore())
++    const second = hydrate(makeStore())
++
++    expect(first).toBe(second)
++    expect(provider.listSessions).toHaveBeenCalledOnce()
++
++    inventory.resolve([])
++    await first
++  })
++
++  it('retries after worktree enumeration throws', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const ptyId = 'repo-a::/local/repo-a@@00000001'
++    const provider = makeProvider([
++      { sessionId: ptyId, pid: 4001, cwd: '/local/repo-a' } as unknown as SessionInfo
++    ])
++    getDaemonProviderMock.mockReturnValue(provider)
++    listLocalRepoWorktreesStrictMock
++      .mockRejectedValueOnce(new Error('git unavailable'))
++      .mockResolvedValue([
++        { path: '/local/repo-a', head: '', branch: '', isBare: false, isMainWorktree: true }
++      ])
++    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
++
++    await hydrate(makeStore([{ id: 'repo-a' }]))
++    expect(listRegisteredPtys()).toHaveLength(0)
++    expect(listLocalRepoWorktreesStrictMock).toHaveBeenCalledOnce()
++
++    await hydrate(makeStore([{ id: 'repo-a' }]))
++    warnSpy.mockRestore()
++
++    expect(listRegisteredPtys()).toEqual([expect.objectContaining({ ptyId })])
++    expect(listLocalRepoWorktreesStrictMock).toHaveBeenCalledTimes(2)
++  })
++
++  it('forwards the WSL project runtime and live deadline signal to strict enumeration', async () => {
++    const { hydrate } = await loadFresh()
++    const ptyId = 'repo-a::/mnt/c/repo-a@@00000001'
++    const store = makeStore([{ id: 'repo-a', path: '/mnt/c/repo-a' }])
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        { sessionId: ptyId, pid: 4001, cwd: '/mnt/c/repo-a' } as unknown as SessionInfo
++      ])
++    )
++    getLocalProjectWorktreeGitOptionsMock.mockReturnValue({ wslDistro: 'Ubuntu' })
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
++      { path: '/mnt/c/repo-a', head: '', branch: '', isBare: false, isMainWorktree: true }
++    ])
++
++    await hydrate(store)
++
++    const [repo, options] = listLocalRepoWorktreesStrictMock.mock.calls[0] as [
++      Repo,
++      { signal: AbortSignal; wslDistro?: string }
++    ]
++    expect(getLocalProjectWorktreeGitOptionsMock).toHaveBeenCalledWith(store, repo)
++    expect(options.wslDistro).toBe('Ubuntu')
++    expect(options.signal).toBeInstanceOf(AbortSignal)
++    expect(options.signal.aborted).toBe(false)
++  })
++
++  it('resolves by the boot deadline and lets a later call retry stalled enumeration', async () => {
++    vi.useFakeTimers()
++    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
++    try {
++      const { hydrate, deadlineMs, listRegisteredPtys } = await loadFresh()
++      const ptyId = 'repo-a::/local/repo-a@@00000001'
++      const provider = makeProvider([
++        { sessionId: ptyId, pid: 4001, cwd: '/local/repo-a' } as unknown as SessionInfo
++      ])
++      const signals: AbortSignal[] = []
++      getDaemonProviderMock.mockReturnValue(provider)
++      listLocalRepoWorktreesStrictMock
++        .mockImplementationOnce((_repo: Repo, options?: { signal?: AbortSignal }) => {
++          if (options?.signal) {
++            signals.push(options.signal)
++          }
++          return new Promise(() => {})
++        })
++        .mockImplementation(async (_repo: Repo, options?: { signal?: AbortSignal }) => {
++          if (options?.signal) {
++            signals.push(options.signal)
++          }
++          return [
++            {
++              path: '/local/repo-a',
++              head: '',
++              branch: '',
++              isBare: false,
++              isMainWorktree: true
++            }
++          ]
++        })
++
++      let settled = false
++      const first = hydrate(makeStore([{ id: 'repo-a' }])).then(() => {
++        settled = true
++      })
++      await vi.advanceTimersByTimeAsync(deadlineMs - 1)
++      expect(settled).toBe(false)
++
++      await vi.advanceTimersByTimeAsync(1)
++      expect(settled).toBe(true)
++      await first
++      expect(signals[0]?.aborted).toBe(true)
++
++      await hydrate(makeStore([{ id: 'repo-a' }]))
++
++      expect(listLocalRepoWorktreesStrictMock).toHaveBeenCalledTimes(2)
++      expect(listRegisteredPtys()).toEqual([expect.objectContaining({ ptyId })])
++      expect(vi.getTimerCount()).toBe(0)
++    } finally {
++      warnSpy.mockRestore()
++      vi.clearAllTimers()
++      vi.useRealTimers()
++    }
++  })
++
++  it('bounds concurrent Git worktree enumeration', async () => {
++    const { hydrate, gitEnumerationConcurrency } = await loadFresh()
++    const repoCount = 6
++    const gate = createDeferred<void>()
++    let active = 0
++    let maxActive = 0
++    const sessions = Array.from({ length: repoCount }, (_, index) => {
++      const repoId = `repo-${index}`
++      return {
++        sessionId: `${repoId}::/local/${repoId}@@0000000${index}`,
++        pid: 4000 + index,
++        cwd: `/local/${repoId}`
++      } as unknown as SessionInfo
++    })
++    getDaemonProviderMock.mockReturnValue(makeProvider(sessions))
++    listLocalRepoWorktreesStrictMock.mockImplementation(async (repo: Repo) => {
++      active += 1
++      maxActive = Math.max(maxActive, active)
++      await gate.promise
++      active -= 1
++      return [
++        { path: `/local/${repo.id}`, head: '', branch: '', isBare: false, isMainWorktree: true }
++      ]
++    })
++
++    const hydration = hydrate(
++      makeStore(Array.from({ length: repoCount }, (_, index) => ({ id: `repo-${index}` })))
++    )
++    let startedBeforeRelease = 0
++    try {
++      await vi.waitFor(() =>
++        expect(listLocalRepoWorktreesStrictMock).toHaveBeenCalledTimes(gitEnumerationConcurrency)
++      )
++      startedBeforeRelease = listLocalRepoWorktreesStrictMock.mock.calls.length
++    } finally {
++      gate.resolve(undefined)
++      await hydration
++    }
++
++    expect(startedBeforeRelease).toBe(gitEnumerationConcurrency)
++    expect(maxActive).toBe(gitEnumerationConcurrency)
++  })
++
++  it('registers successful adapter rows but retries a failed adapter', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const sessionA = {
++      sessionId: 'repo-a::/local/repo-a@@00000001',
++      pid: 4001,
++      cwd: '/local/repo-a'
++    } as unknown as SessionInfo
++    const sessionB = {
++      sessionId: 'repo-b::/local/repo-b@@00000002',
++      pid: 4002,
++      cwd: '/local/repo-b'
++    } as unknown as SessionInfo
++    const adapterA = makeProvider([sessionA])
++    const adapterB = {
++      listSessions: vi
++        .fn()
++        .mockRejectedValueOnce(new Error('legacy unavailable'))
++        .mockRejectedValueOnce(new Error('legacy unavailable'))
++        .mockResolvedValue([sessionB])
++    }
++    getDaemonProviderMock.mockReturnValue(makeProviderGroup([adapterA, adapterB]))
++    listLocalRepoWorktreesStrictMock.mockImplementation(async (repo: Repo) => [
++      { path: `/local/${repo.id}`, head: '', branch: '', isBare: false, isMainWorktree: true }
++    ])
++    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
++    const store = makeStore([{ id: 'repo-a' }, { id: 'repo-b' }])
++
++    await hydrate(store)
++    expect(listRegisteredPtys().map((pty) => pty.ptyId)).toEqual([sessionA.sessionId])
++
++    await hydrate(store)
++    warnSpy.mockRestore()
++
++    expect(
++      listRegisteredPtys()
++        .map((pty) => pty.ptyId)
++        .sort()
++    ).toEqual([sessionA.sessionId, sessionB.sessionId].sort())
++  })
++
++  it('retries an all-adapter inventory failure and latches only the complete retry', async () => {
++    const { hydrate } = await loadFresh()
++    const firstAdapter = {
++      listSessions: vi.fn().mockRejectedValueOnce(new Error('current down')).mockResolvedValue([])
++    }
++    const secondAdapter = {
++      listSessions: vi.fn().mockRejectedValueOnce(new Error('legacy down')).mockResolvedValue([])
++    }
++    getDaemonProviderMock.mockReturnValue(makeProviderGroup([firstAdapter, secondAdapter]))
++    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
++
++    await hydrate(makeStore())
++    await hydrate(makeStore())
++    await hydrate(makeStore())
++    warnSpy.mockRestore()
++
++    expect(firstAdapter.listSessions).toHaveBeenCalledTimes(2)
++    expect(secondAdapter.listSessions).toHaveBeenCalledTimes(2)
+@@ -186 +449 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockResolvedValue([
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
+@@ -196 +459 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    expect(listRepoWorktreesMock).not.toHaveBeenCalled()
++    expect(listLocalRepoWorktreesStrictMock).not.toHaveBeenCalled()
+@@ -210 +473 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockReturnValue(worktrees.promise)
++    listLocalRepoWorktreesStrictMock.mockReturnValue(worktrees.promise)
+@@ -213 +476 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    await vi.waitFor(() => expect(listRepoWorktreesMock).toHaveBeenCalledTimes(1))
++    await vi.waitFor(() => expect(listLocalRepoWorktreesStrictMock).toHaveBeenCalledTimes(1))
+@@ -247 +510 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockReturnValue(worktrees.promise)
++    listLocalRepoWorktreesStrictMock.mockReturnValue(worktrees.promise)
+@@ -250 +513 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    await vi.waitFor(() => expect(listRepoWorktreesMock).toHaveBeenCalledTimes(1))
++    await vi.waitFor(() => expect(listLocalRepoWorktreesStrictMock).toHaveBeenCalledTimes(1))
+@@ -269 +532 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockResolvedValue([
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
+@@ -279 +542,18 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    expect(listRepoWorktreesMock).not.toHaveBeenCalled()
++    expect(listLocalRepoWorktreesStrictMock).not.toHaveBeenCalled()
++  })
++
++  it('skips paired-runtime repos even when connectionId is absent', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const provider = makeProvider([
++      {
++        sessionId: 'repo-runtime::/runtime/Stingray@@feedface',
++        pid: 999,
++        cwd: '/runtime/Stingray'
++      } as unknown as SessionInfo
++    ])
++    getDaemonProviderMock.mockReturnValue(provider)
++
++    await hydrate(makeStore([{ id: 'repo-runtime', executionHostId: 'runtime:environment-1' }]))
++
++    expect(listRegisteredPtys()).toHaveLength(0)
++    expect(listLocalRepoWorktreesStrictMock).not.toHaveBeenCalled()
+@@ -290 +570 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockResolvedValue([
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
+@@ -301,0 +582,215 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
++  it('matches Windows worktree path spelling while preserving the daemon worktree id', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const worktreeId = 'repo-a::C:/Users/Neil/Orca'
++    const ptyId = `${worktreeId}@@cafebabe`
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        { sessionId: ptyId, pid: 4242, cwd: 'C:/Users/Neil/Orca' } as unknown as SessionInfo
++      ])
++    )
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
++      {
++        path: 'c:\\users\\neil\\orca',
++        head: '',
++        branch: '',
++        isBare: false,
++        isMainWorktree: true
++      }
++    ])
++
++    await hydrate(makeStore([{ id: 'repo-a', path: 'C:\\Users\\Neil\\Orca' }]))
++
++    expect(listRegisteredPtys()).toEqual([expect.objectContaining({ ptyId, worktreeId })])
++  })
++
++  it('fails closed when live worktrees collide on one normalized key', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const ptyId = 'repo-a::C:/Users/Neil/Orca@@cafebabe'
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        { sessionId: ptyId, pid: 4242, cwd: 'C:/Users/Neil/Orca' } as unknown as SessionInfo
++      ])
++    )
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
++      {
++        path: 'C:/Users/Neil/Orca',
++        head: '',
++        branch: '',
++        isBare: false,
++        isMainWorktree: true
++      },
++      {
++        path: 'c:\\users\\neil\\orca',
++        head: '',
++        branch: '',
++        isBare: false,
++        isMainWorktree: false
++      }
++    ])
++
++    await hydrate(makeStore([{ id: 'repo-a', path: 'C:/Users/Neil/Orca' }]))
++
++    expect(listRegisteredPtys()).toHaveLength(0)
++  })
++
++  it('matches local WSL UNC aliases without treating WSL as a remote host', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const worktreeId = 'repo-a::\\\\wsl$\\Ubuntu\\home\\neil\\orca'
++    const ptyId = `${worktreeId}@@cafebabe`
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        {
++          sessionId: ptyId,
++          pid: 4242,
++          cwd: '\\\\wsl$\\Ubuntu\\home\\neil\\orca'
++        } as unknown as SessionInfo
++      ])
++    )
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
++      {
++        path: '\\\\wsl.localhost\\ubuntu\\home\\neil\\orca',
++        head: '',
++        branch: '',
++        isBare: false,
++        isMainWorktree: true
++      }
++    ])
++
++    await hydrate(makeStore([{ id: 'repo-a', path: '\\\\wsl$\\Ubuntu\\home\\neil\\orca' }]))
++
++    expect(listRegisteredPtys()).toEqual([expect.objectContaining({ ptyId, worktreeId })])
++  })
++
++  it('preserves an exact repo-backed folder instance id from local-host metadata', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const instanceId =
++      'folder-repo::/workspace/folder::workspace:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
++    const ptyId = `${instanceId}@@cafebabe`
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        { sessionId: ptyId, pid: 4242, cwd: '/workspace/folder' } as unknown as SessionInfo
++      ])
++    )
++
++    await hydrate(
++      makeStore([{ id: 'folder-repo', kind: 'folder', path: '/workspace/folder' }], {
++        [instanceId]: { hostId: 'local' } as WorktreeMeta
++      })
++    )
++
++    expect(listRegisteredPtys()).toEqual([
++      expect.objectContaining({ ptyId, worktreeId: instanceId })
++    ])
++    expect(listLocalRepoWorktreesStrictMock).not.toHaveBeenCalled()
++  })
++
++  it('accepts legacy unhosted folder-instance metadata for a uniquely local repo', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const instanceId =
++      'folder-repo::/workspace/folder::workspace:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
++    const ptyId = `${instanceId}@@cafebabe`
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        { sessionId: ptyId, pid: 4242, cwd: '/workspace/folder' } as unknown as SessionInfo
++      ])
++    )
++
++    await hydrate(
++      makeStore([{ id: 'folder-repo', kind: 'folder', path: '/workspace/folder' }], {
++        [instanceId]: {} as WorktreeMeta
++      })
++    )
++
++    expect(listRegisteredPtys()).toEqual([expect.objectContaining({ ptyId })])
++  })
++
++  it('rejects legacy folder-instance metadata when the repo id also has a remote owner', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const instanceId =
++      'folder-repo::/workspace/folder::workspace:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        {
++          sessionId: `${instanceId}@@cafebabe`,
++          pid: 4242,
++          cwd: '/workspace/folder'
++        } as unknown as SessionInfo
++      ])
++    )
++
++    await hydrate(
++      makeStore(
++        [
++          { id: 'folder-repo', kind: 'folder', path: '/workspace/folder' },
++          {
++            id: 'folder-repo',
++            kind: 'folder',
++            path: '/workspace/folder',
++            executionHostId: 'runtime:environment-1'
++          }
++        ],
++        { [instanceId]: {} as WorktreeMeta }
++      )
++    )
++
++    expect(listRegisteredPtys()).toHaveLength(0)
++  })
++
++  it('accepts explicit local folder-instance metadata beside a same-id runtime owner', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const instanceId =
++      'folder-repo::/workspace/folder::workspace:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
++    const ptyId = `${instanceId}@@cafebabe`
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        { sessionId: ptyId, pid: 4242, cwd: '/workspace/folder' } as unknown as SessionInfo
++      ])
++    )
++
++    await hydrate(
++      makeStore(
++        [
++          { id: 'folder-repo', kind: 'folder', path: '/workspace/folder' },
++          {
++            id: 'folder-repo',
++            kind: 'folder',
++            path: '/workspace/folder',
++            executionHostId: 'runtime:environment-1'
++          }
++        ],
++        { [instanceId]: { hostId: 'local' } as WorktreeMeta }
++      )
++    )
++
++    expect(listRegisteredPtys()).toEqual([expect.objectContaining({ ptyId })])
++  })
++
++  it('keeps true folder workspace PTY ids as an accepted hydration gap', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const workspace = {
++      id: 'folder-workspace-1',
++      executionHostId: 'local'
++    } as FolderWorkspace
++    getDaemonProviderMock.mockReturnValue(
++      makeProvider([
++        {
++          sessionId: 'folder:folder-workspace-1@@cafebabe',
++          pid: 4242,
++          cwd: '/workspace/folder'
++        } as unknown as SessionInfo
++      ])
++    )
++
++    expect(
++      resolveFolderWorkspaceHost(
++        { folderWorkspaces: [workspace], projectGroups: [], repos: [] },
++        workspace.id
++      )
++    ).toEqual({ kind: 'local' })
++
++    await hydrate(makeStore())
++
++    expect(listRegisteredPtys()).toHaveLength(0)
++    expect(listLocalRepoWorktreesStrictMock).not.toHaveBeenCalled()
++  })
++
+@@ -312 +807 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockResolvedValue([
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
+@@ -318 +813 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    expect(listRepoWorktreesMock).toHaveBeenCalledTimes(1)
++    expect(listLocalRepoWorktreesStrictMock).toHaveBeenCalledTimes(1)
+@@ -337 +832 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockImplementation(async (repo: Repo) => [
++    listLocalRepoWorktreesStrictMock.mockImplementation(async (repo: Repo) => [
+@@ -349,2 +844,2 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    expect(listRepoWorktreesMock).toHaveBeenCalledTimes(activeRepoIds.length)
+-    expect(listRepoWorktreesMock.mock.calls.map(([repo]) => (repo as Repo).id)).toEqual(
++    expect(listLocalRepoWorktreesStrictMock).toHaveBeenCalledTimes(activeRepoIds.length)
++    expect(listLocalRepoWorktreesStrictMock.mock.calls.map(([repo]) => (repo as Repo).id)).toEqual(
+@@ -377 +872 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockImplementation(async (repo: Repo) => [
++    listLocalRepoWorktreesStrictMock.mockImplementation(async (repo: Repo) => [
+@@ -383 +878 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    expect(listRepoWorktreesMock.mock.calls.map(([repo]) => (repo as Repo).id)).toEqual([
++    expect(listLocalRepoWorktreesStrictMock.mock.calls.map(([repo]) => (repo as Repo).id)).toEqual([
+@@ -394,0 +890,17 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
++  it('hydrates all 26 retained daemon sessions before diagnostics are exposed', async () => {
++    const { hydrate, listRegisteredPtys } = await loadFresh()
++    const sessions = makeLocalSessions('repo-a', '/local/Triton', 26)
++    const provider = makeProvider(sessions)
++    getDaemonProviderMock.mockReturnValue(provider)
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
++      { path: '/local/Triton', head: '', branch: '', isBare: false, isMainWorktree: true }
++    ])
++
++    await hydrate(makeStore([{ id: 'repo-a', connectionId: null }]))
++
++    expect(provider.listSessions).toHaveBeenCalledTimes(2)
++    expect(listRegisteredPtys().map((entry) => entry.ptyId)).toEqual(
++      sessions.map((session) => session.sessionId)
++    )
++  })
++
+@@ -401 +913 @@ describe('hydrateLocalPtyRegistryAtBoot', () => {
+-    listRepoWorktreesMock.mockResolvedValue([
++    listLocalRepoWorktreesStrictMock.mockResolvedValue([
+diff --git a/src/main/memory/hydrate-local-pty-registry.ts b/src/main/memory/hydrate-local-pty-registry.ts
+index 3388eeebed9bfc557ee3977a5c219be2afeab043..b384439f0f2fa82820f6702259f337b20907c34c 100644
+--- a/src/main/memory/hydrate-local-pty-registry.ts
++++ b/src/main/memory/hydrate-local-pty-registry.ts
+@@ -1,10 +1,7 @@
+-/**
+- * Boot-time hydration of `pty-registry` from the live daemon.
+- *
+- * Why: on warm reattach (fresh Orca process, still-running daemon) the renderer
+- * hasn't re-mounted every pane, so `pty:spawn` never fired for those sessions
+- * and they surfaced as "REMOTE" despite being local. Fill the gap once at boot,
+- * registering only sessions whose repo has no `connectionId` — mirroring the
+- * spawn-time gate in `src/main/ipc/pty.ts`.
+- */
+-
++import { getRepoExecutionHostId, LOCAL_EXECUTION_HOST_ID } from '../../shared/execution-host'
++import { throwIfSignalAborted, waitForPromiseWithSignal } from '../../shared/abort-signal-reason'
++import { mapSettledWithConcurrency } from '../../shared/map-with-concurrency'
++import { parsePtySessionId } from '../../shared/pty-session-id-format'
++import { isFolderRepo } from '../../shared/repo-kind'
++import type { Repo } from '../../shared/repo-types'
++import { splitWorktreeId, worktreeIdComparisonKey } from '../../shared/worktree/id'
+@@ -12,2 +8,0 @@ import { getDaemonProvider } from '../daemon/daemon-init'
+-import { DaemonPtyRouter } from '../daemon/daemon-pty-router'
+-import { DegradedDaemonPtyProvider } from '../daemon/degraded-daemon-pty-provider'
+@@ -14,0 +10,2 @@ import type { DaemonPtyAdapter } from '../daemon/daemon-pty-adapter'
++import type { DaemonPtyRouter } from '../daemon/daemon-pty-router'
++import type { DegradedDaemonPtyProvider } from '../daemon/degraded-daemon-pty-provider'
+@@ -16,4 +13 @@ import type { SessionInfo } from '../daemon/types'
+-import { listRegisteredPtys, registerPty } from './pty-registry'
+-import { listRepoWorktrees } from '../repo-worktrees'
+-import { parsePtySessionId } from '../../shared/pty-session-id-format'
+-import { splitWorktreeId } from '../../shared/worktree/id'
++import { isFolderWorkspaceIdForRepo } from '../ipc/worktrees/folder-workspace-model'
+@@ -20,0 +15,20 @@ import type { Store } from '../persistence'
++import { readAllWorktreeMetaForHost } from '../persistence/host-qualified-worktree-meta'
++import { getLocalProjectWorktreeGitOptions } from '../project-runtime-git-options'
++import { listLocalRepoWorktreesStrict } from '../repo-worktrees'
++import { listRegisteredPtys, registerPty } from './pty-registry'
++
++type HydrationStore = Store
++
++type DaemonInventory = {
++  complete: boolean
++  sessions: SessionInfo[]
++}
++
++type LocalRepoCatalog = {
++  byId: Map<string, Repo>
++  ownerCountById: Map<string, number>
++}
++
++// Why: matches existing local Git/read startup budgets while allowing for Defender-heavy repos.
++export const LOCAL_PTY_REGISTRY_BOOT_HYDRATION_DEADLINE_MS = 5_000
++export const LOCAL_PTY_REGISTRY_GIT_ENUMERATION_CONCURRENCY = 4
+@@ -22 +35,0 @@ import type { Store } from '../persistence'
+-// Why: macOS dock reactivation reruns setup; avoid repeating Git I/O and daemon RPC.
+@@ -23,0 +37 @@ let hasHydrated = false
++let hydrationInFlight: Promise<void> | null = null
+@@ -25,48 +39,20 @@ let hasHydrated = false
+-/**
+- * Read the live daemon session list and register every local session the
+- * registry doesn't already know about.
+- *
+- * Why: failures here are a coverage degradation (the renderer-side union still
+- * covers the gap), not a correctness regression, so they're swallowed.
+- */
+-export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos'>): Promise<void> {
+-  try {
+-    if (hasHydrated) {
+-      return
+-    }
+-    const provider = getDaemonProvider()
+-    if (!provider) {
+-      // Why: leave hasHydrated false so a later activation can retry once the daemon is up.
+-      return
+-    }
+-    // Why: flip only after a provider exists; retrying a failed RPC on the same socket won't help.
+-    hasHydrated = true
+-
+-    // Why: enumerate Git worktrees only for live-session repos.
+-    const reposById = new Map(store.getRepos().map((repo) => [repo.id, repo]))
+-    // Why: verify via live git that a referenced worktree still exists, to avoid resurrecting removed ones.
+-    const liveLocalWorktreeIds = new Set<string>()
+-    const resolvedRepoIds = new Set<string>()
+-
+-    let sessionInfos = await collectSessionInfos(provider)
+-    let alreadyRegistered = new Set(listRegisteredPtys().map((p) => p.ptyId))
+-
+-    // Why: re-read live sessions each pass to avoid resurrecting exited sessions.
+-    for (;;) {
+-      const newlyReferencedRepos = new Map<string, ReturnType<(typeof store)['getRepos']>[number]>()
+-      for (const info of sessionInfos) {
+-        if (alreadyRegistered.has(info.sessionId)) {
+-          continue
+-        }
+-        const { worktreeId } = parsePtySessionId(info.sessionId)
+-        const parsedWorktreeId = worktreeId ? splitWorktreeId(worktreeId) : null
+-        if (!parsedWorktreeId || resolvedRepoIds.has(parsedWorktreeId.repoId)) {
+-          continue
+-        }
+-        const repo = reposById.get(parsedWorktreeId.repoId)
+-        if (!repo || (repo.connectionId ?? null)) {
+-          // Why: unknown and SSH repos cannot be proven local, so do not enumerate them.
+-          resolvedRepoIds.add(parsedWorktreeId.repoId)
+-          continue
+-        }
+-        newlyReferencedRepos.set(repo.id, repo)
++export function hydrateLocalPtyRegistryAtBoot(store: HydrationStore): Promise<void> {
++  if (hasHydrated) {
++    return Promise.resolve()
++  }
++  if (hydrationInFlight) {
++    return hydrationInFlight
++  }
++
++  const controller = new AbortController()
++  const deadline = setTimeout(() => {
++    controller.abort(new Error('Boot-time pty-registry hydration deadline expired'))
++  }, LOCAL_PTY_REGISTRY_BOOT_HYDRATION_DEADLINE_MS)
++  let attempt!: Promise<void>
++  attempt = waitForPromiseWithSignal(
++    hydrateLocalPtyRegistry(store, controller.signal),
++    controller.signal
++  )
++    .then((complete) => {
++      if (complete) {
++        hasHydrated = true
+@@ -74,2 +60,11 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
+-      if (newlyReferencedRepos.size === 0) {
+-        break
++    })
++    .catch((error) => {
++      console.warn(
++        '[memory] Boot-time pty-registry hydration failed:',
++        error instanceof Error ? error.message : String(error)
++      )
++    })
++    .finally(() => {
++      clearTimeout(deadline)
++      if (hydrationInFlight === attempt) {
++        hydrationInFlight = null
+@@ -76,0 +72,4 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
++    })
++  hydrationInFlight = attempt
++  return attempt
++}
+@@ -78,7 +77,9 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
+-      for (const repo of newlyReferencedRepos.values()) {
+-        resolvedRepoIds.add(repo.id)
+-        const worktrees = await listRepoWorktrees(repo)
+-        for (const wt of worktrees) {
+-          liveLocalWorktreeIds.add(`${repo.id}::${wt.path}`)
+-        }
+-      }
++async function hydrateLocalPtyRegistry(
++  store: HydrationStore,
++  signal: AbortSignal
++): Promise<boolean> {
++  throwIfSignalAborted(signal)
++  const provider = getDaemonProvider()
++  if (!provider) {
++    return false
++  }
+@@ -86,5 +87,12 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
+-      sessionInfos = await collectSessionInfos(provider)
+-      alreadyRegistered = new Set(listRegisteredPtys().map((p) => p.ptyId))
+-    }
+-    for (const info of sessionInfos) {
+-      // Why: pty:spawn is the authoritative pid writer; don't overwrite its entry with a stale listSessions() pid.
++  const repoCatalog = getLocalRepoCatalog(store.getRepos())
++  const reposById = repoCatalog.byId
++  const verifiedFolderWorktreeIds = getVerifiedFolderWorktreeIds(store, repoCatalog)
++  const liveGitWorktreeIdsByKey = new Map<string, string | null>()
++  const resolvedRepoIds = new Set<string>()
++  let inventory = await collectSessionInfos(provider, signal)
++  let complete = inventory.complete
++  let alreadyRegistered = new Set(listRegisteredPtys().map((pty) => pty.ptyId))
++
++  for (;;) {
++    const referencedRepos = new Map<string, Repo>()
++    for (const info of inventory.sessions) {
+@@ -94,2 +102,2 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
+-      const { worktreeId } = parsePtySessionId(info.sessionId)
+-      if (!worktreeId) {
++      const parsed = splitWorktreeId(parsePtySessionId(info.sessionId).worktreeId ?? '')
++      if (!parsed || resolvedRepoIds.has(parsed.repoId)) {
+@@ -98,2 +106,3 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
+-      // Why: register only proven-local worktrees, matching the spawn-time gate.
+-      if (!liveLocalWorktreeIds.has(worktreeId)) {
++      const repo = reposById.get(parsed.repoId)
++      if (!repo || isFolderRepo(repo)) {
++        resolvedRepoIds.add(parsed.repoId)
+@@ -102,10 +111,7 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
+-      registerPty({
+-        ptyId: info.sessionId,
+-        worktreeId,
+-        sessionId: info.sessionId,
+-        paneKey: null,
+-        pid:
+-          typeof info.pid === 'number' && Number.isFinite(info.pid) && info.pid > 0
+-            ? info.pid
+-            : null
+-      })
++      referencedRepos.set(repo.id, repo)
++    }
++    if (referencedRepos.size === 0) {
++      break
++    }
++    for (const repo of referencedRepos.values()) {
++      resolvedRepoIds.add(repo.id)
+@@ -113,4 +119,16 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
+-  } catch (err) {
+-    console.warn(
+-      '[memory] Boot-time pty-registry hydration failed:',
+-      err instanceof Error ? err.message : String(err)
++
++    const worktreeResults = await mapSettledWithConcurrency(
++      [...referencedRepos.values()],
++      LOCAL_PTY_REGISTRY_GIT_ENUMERATION_CONCURRENCY,
++      async (repo) => {
++        throwIfSignalAborted(signal)
++        const worktrees = await waitForPromiseWithSignal(
++          listLocalRepoWorktreesStrict(repo, {
++            ...getLocalProjectWorktreeGitOptions(store, repo),
++            signal
++          }),
++          signal
++        )
++        throwIfSignalAborted(signal)
++        return { repo, worktrees }
++      }
+@@ -117,0 +136,28 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
++    throwIfSignalAborted(signal)
++
++    for (const result of worktreeResults) {
++      if (result.status === 'rejected') {
++        complete = false
++        console.warn(
++          '[memory] Worktree enumeration failed during pty-registry hydration:',
++          result.reason instanceof Error ? result.reason.message : String(result.reason)
++        )
++        continue
++      }
++      const { repo, worktrees } = result.value
++      for (const worktree of worktrees) {
++        const worktreeId = `${repo.id}::${worktree.path}`
++        const key = worktreeIdComparisonKey(worktreeId)
++        if (key) {
++          const existing = liveGitWorktreeIdsByKey.get(key)
++          liveGitWorktreeIdsByKey.set(
++            key,
++            existing === undefined || existing === worktreeId ? worktreeId : null
++          )
++        }
++      }
++    }
++
++    inventory = await collectSessionInfos(provider, signal)
++    complete = complete && inventory.complete
++    alreadyRegistered = new Set(listRegisteredPtys().map((pty) => pty.ptyId))
+@@ -118,0 +165,74 @@ export async function hydrateLocalPtyRegistryAtBoot(store: Pick<Store, 'getRepos
++
++  throwIfSignalAborted(signal)
++  for (const info of inventory.sessions) {
++    throwIfSignalAborted(signal)
++    if (alreadyRegistered.has(info.sessionId)) {
++      continue
++    }
++    const { worktreeId } = parsePtySessionId(info.sessionId)
++    if (!worktreeId || !isVerifiedLocalWorktree(worktreeId)) {
++      continue
++    }
++    registerPty({
++      ptyId: info.sessionId,
++      worktreeId,
++      sessionId: info.sessionId,
++      paneKey: null,
++      pid:
++        typeof info.pid === 'number' && Number.isFinite(info.pid) && info.pid > 0 ? info.pid : null
++    })
++  }
++  return complete
++
++  function isVerifiedLocalWorktree(worktreeId: string): boolean {
++    if (verifiedFolderWorktreeIds.has(worktreeId)) {
++      return true
++    }
++    const key = worktreeIdComparisonKey(worktreeId)
++    return key !== null && typeof liveGitWorktreeIdsByKey.get(key) === 'string'
++  }
++}
++
++function getLocalRepoCatalog(repos: Repo[]): LocalRepoCatalog {
++  const byId = new Map<string, Repo>()
++  const ownerCountById = new Map<string, number>()
++  const ambiguousIds = new Set<string>()
++  for (const repo of repos) {
++    ownerCountById.set(repo.id, (ownerCountById.get(repo.id) ?? 0) + 1)
++    if (getRepoExecutionHostId(repo) !== LOCAL_EXECUTION_HOST_ID) {
++      continue
++    }
++    if (byId.has(repo.id)) {
++      ambiguousIds.add(repo.id)
++    } else {
++      byId.set(repo.id, repo)
++    }
++  }
++  for (const repoId of ambiguousIds) {
++    byId.delete(repoId)
++  }
++  return { byId, ownerCountById }
++}
++
++function getVerifiedFolderWorktreeIds(
++  store: HydrationStore,
++  repoCatalog: LocalRepoCatalog
++): Set<string> {
++  const verified = new Set<string>()
++  const metadata = readAllWorktreeMetaForHost(store, LOCAL_EXECUTION_HOST_ID)
++  for (const [worktreeId, meta] of Object.entries(metadata)) {
++    const parsed = splitWorktreeId(worktreeId)
++    const repo = parsed ? repoCatalog.byId.get(parsed.repoId) : undefined
++    const hasLocalAuthority =
++      meta.hostId === LOCAL_EXECUTION_HOST_ID ||
++      (meta.hostId === undefined && repoCatalog.ownerCountById.get(parsed?.repoId ?? '') === 1)
++    if (
++      repo &&
++      isFolderRepo(repo) &&
++      hasLocalAuthority &&
++      isFolderWorkspaceIdForRepo(repo, worktreeId)
++    ) {
++      verified.add(worktreeId)
++    }
++  }
++  return verified
+@@ -122,5 +242,5 @@ async function collectSessionInfos(
+-  provider: DaemonPtyRouter | DaemonPtyAdapter | DegradedDaemonPtyProvider
+-): Promise<SessionInfo[]> {
+-  // Why: fan listSessions across current + legacy adapters so no daemon protocol version is missed.
+-  const adapters: readonly DaemonPtyAdapter[] =
+-    provider instanceof DaemonPtyRouter || provider instanceof DegradedDaemonPtyProvider
++  provider: DaemonPtyRouter | DaemonPtyAdapter | DegradedDaemonPtyProvider,
++  signal: AbortSignal
++): Promise<DaemonInventory> {
++  const adapters =
++    'getAllAdapters' in provider && typeof provider.getAllAdapters === 'function'
+@@ -129,7 +249,17 @@ async function collectSessionInfos(
+-  const out: SessionInfo[] = []
+-  for (const adapter of adapters) {
+-    try {
+-      const sessions = await adapter.listSessions()
+-      // Why: session count can exceed the JS argument limit, so avoid push(...sessions).
+-      for (const session of sessions) {
+-        out.push(session)
++  const results = await Promise.all(
++    adapters.map(async (adapter) => {
++      try {
++        throwIfSignalAborted(signal)
++        const sessions = await waitForPromiseWithSignal<SessionInfo[]>(
++          adapter.listSessions(),
++          signal
++        )
++        throwIfSignalAborted(signal)
++        return { complete: true, sessions }
++      } catch (error) {
++        throwIfSignalAborted(signal)
++        console.warn(
++          '[memory] listSessions failed for one adapter during hydration:',
++          error instanceof Error ? error.message : String(error)
++        )
++        return { complete: false, sessions: [] }
+@@ -137,6 +267,6 @@ async function collectSessionInfos(
+-    } catch (err) {
+-      // Why: one adapter's socket being unreachable is normal; don't abort the others.
+-      console.warn(
+-        '[memory] listSessions failed for one adapter during hydration:',
+-        err instanceof Error ? err.message : String(err)
+-      )
++    })
++  )
++  const sessions: SessionInfo[] = []
++  for (const result of results) {
++    for (const session of result.sessions) {
++      sessions.push(session)
+@@ -145 +275,4 @@ async function collectSessionInfos(
+-  return out
++  return {
++    complete: results.length > 0 && results.every((result) => result.complete),
++    sessions
++  }
+diff --git a/src/main/orcad/orcad-entry.ts b/src/main/orcad/orcad-entry.ts
+index 4af2a87c45da87dfdbbe8a7a1bb2906a5050bc2d..3b10ca985e9a5dc802fca736500c5d8af38c293d 100644
+--- a/src/main/orcad/orcad-entry.ts
++++ b/src/main/orcad/orcad-entry.ts
+@@ -193 +193 @@ async function startOrcadRuntime(
+-  registerHeadlessPtyRuntime(runtime, undefined, () => store.getSettings(), undefined, store)
++  await registerHeadlessPtyRuntime(runtime, undefined, () => store.getSettings(), undefined, store)
 diff --git a/src/main/persistence-automations.test.ts b/src/main/persistence-automations.test.ts
-index 9db16b7e68..e0348510e0 100644
+index 9db16b7e681569ba76628a98afc0f4c12ad3f5d1..e0348510e039d40b5bc449d76a4252ec0af6e10d 100644
 --- a/src/main/persistence-automations.test.ts
 +++ b/src/main/persistence-automations.test.ts
-@@ -749,6 +749,7 @@ describe('Store', () => {
-       terminalSessionId: 'tab-1',
-       terminalPaneKey: paneKey,
-       terminalPtyId: 'pty-run',
+@@ -751,0 +752 @@ describe('Store', () => {
 +      completionAuthority: 'process-exit',
-       outputSnapshot: {
-         format: 'plain_text',
-         content: 'Run finished',
-@@ -773,7 +774,11 @@ describe('Store', () => {
-     expect(persisted).toMatchObject({
-       terminalSessionId: 'tab-1',
-       terminalPaneKey: paneKey,
+@@ -776 +777,2 @@ describe('Store', () => {
 -      terminalPtyId: 'pty-run'
 +      terminalPtyId: 'pty-run',
 +      completionAuthority: 'process-exit'
-     })
+@@ -777,0 +780,3 @@ describe('Store', () => {
 +
 +    const reloaded = await createStore()
 +    expect(reloaded.listAutomationRuns(automation.id)[0].completionAuthority).toBe('process-exit')
-   })
- })
 diff --git a/src/main/persistence/scheduling-automations/automation-run-operations.ts b/src/main/persistence/scheduling-automations/automation-run-operations.ts
-index 639fda7b83..9edfb77f5f 100644
+index 639fda7b836b79bb7be9378085fe2e922eb70df7..9edfb77f5f15682dcfedbfdd263e8fecc35dfb45 100644
 --- a/src/main/persistence/scheduling-automations/automation-run-operations.ts
 +++ b/src/main/persistence/scheduling-automations/automation-run-operations.ts
-@@ -167,6 +167,9 @@ export function updateAutomationRun(
-     terminalPtyId: Object.hasOwn(result, 'terminalPtyId')
-       ? normalizeAutomationRunTerminalPtyId(result.terminalPtyId)
-       : normalizeAutomationRunTerminalPtyId(current.terminalPtyId),
+@@ -169,0 +170,3 @@ export function updateAutomationRun(
 +    completionAuthority: Object.hasOwn(result, 'completionAuthority')
 +      ? result.completionAuthority
 +      : current.completionAuthority,
-     outputSnapshot: Object.hasOwn(result, 'outputSnapshot')
-       ? normalizeAutomationRunOutputSnapshot(result.outputSnapshot)
-       : normalizeAutomationRunOutputSnapshot(current.outputSnapshot),
+diff --git a/src/main/repo-worktrees.test.ts b/src/main/repo-worktrees.test.ts
+index 3c6910991f008b7537631211f6196eb97f45bbd0..d0c0ea5c6173d3fe6960b0cff36d430e76727bbd 100644
+--- a/src/main/repo-worktrees.test.ts
++++ b/src/main/repo-worktrees.test.ts
+@@ -3,2 +3,3 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
+-const { listWorktreesMock } = vi.hoisted(() => ({
+-  listWorktreesMock: vi.fn()
++const { listWorktreesMock, listWorktreesStrictMock } = vi.hoisted(() => ({
++  listWorktreesMock: vi.fn(),
++  listWorktreesStrictMock: vi.fn()
+@@ -8 +9,2 @@ vi.mock('./git/worktree', () => ({
+-  listWorktrees: listWorktreesMock
++  listWorktrees: listWorktreesMock,
++  listWorktreesStrict: listWorktreesStrictMock
+@@ -11 +13,6 @@ vi.mock('./git/worktree', () => ({
+-import { createFolderWorktree, isRepoRoot, listRepoWorktrees } from './repo-worktrees'
++import {
++  createFolderWorktree,
++  isRepoRoot,
++  listLocalRepoWorktreesStrict,
++  listRepoWorktrees
++} from './repo-worktrees'
+@@ -15,0 +23 @@ describe('repo-worktrees', () => {
++    listWorktreesStrictMock.mockReset()
+@@ -58,0 +67,23 @@ describe('repo-worktrees', () => {
++  it('returns the synthetic folder worktree for strict local listing', async () => {
++    const result = await listLocalRepoWorktreesStrict({
++      id: 'repo-1',
++      path: '/workspace/folder',
++      displayName: 'folder',
++      badgeColor: '#000',
++      addedAt: 0,
++      kind: 'folder'
++    })
++
++    expect(result).toEqual([
++      createFolderWorktree({
++        id: 'repo-1',
++        path: '/workspace/folder',
++        displayName: 'folder',
++        badgeColor: '#000',
++        addedAt: 0,
++        kind: 'folder'
++      })
++    ])
++    expect(listWorktreesStrictMock).not.toHaveBeenCalled()
++  })
++
+@@ -80,0 +112,40 @@ describe('repo-worktrees', () => {
++  it('delegates strict local listing with the signal and WSL options', async () => {
++    listWorktreesStrictMock.mockResolvedValue([
++      { path: '/workspace/repo', head: 'abc', branch: '', isBare: false, isMainWorktree: true }
++    ])
++    const signal = new AbortController().signal
++
++    const result = await listLocalRepoWorktreesStrict(
++      {
++        id: 'repo-1',
++        path: '/workspace/repo',
++        displayName: 'repo',
++        badgeColor: '#000',
++        addedAt: 0,
++        kind: 'git'
++      },
++      { signal, wslDistro: 'Ubuntu' }
++    )
++
++    expect(listWorktreesStrictMock).toHaveBeenCalledWith('/workspace/repo', {
++      signal,
++      wslDistro: 'Ubuntu'
++    })
++    expect(result).toHaveLength(1)
++  })
++
++  it('rejects strict listing for remote repos', async () => {
++    await expect(
++      listLocalRepoWorktreesStrict({
++        id: 'repo-1',
++        path: '/workspace/repo',
++        displayName: 'repo',
++        badgeColor: '#000',
++        addedAt: 0,
++        connectionId: 'ssh-1',
++        kind: 'git'
++      })
++    ).rejects.toThrow('remote repository')
++    expect(listWorktreesStrictMock).not.toHaveBeenCalled()
++  })
++
+diff --git a/src/main/repo-worktrees.ts b/src/main/repo-worktrees.ts
+index f4123c18889bfe7953095c45d9a135f405ae2715..14751c17861c5d2f7f9883024f23fa8242f2b00d 100644
+--- a/src/main/repo-worktrees.ts
++++ b/src/main/repo-worktrees.ts
+@@ -3 +3 @@ import type { GitWorktreeInfo } from '../shared/worktree/types'
+-import { listWorktrees } from './git/worktree'
++import { listWorktrees, listWorktreesStrict } from './git/worktree'
+@@ -53,0 +54,15 @@ export async function listRepoWorktrees(
++
++export async function listLocalRepoWorktreesStrict(
++  repo: Repo,
++  options?: LocalRepoWorktreeListOptions
++): Promise<GitWorktreeInfo[]> {
++  if (repo.connectionId) {
++    throw new Error('Cannot list worktrees for a remote repository')
++  }
++  if (isFolderRepo(repo)) {
++    return [createFolderWorktree(repo)]
++  }
++  return hasLocalRepoWorktreeListOptions(options)
++    ? await listWorktreesStrict(repo.path, options)
++    : await listWorktreesStrict(repo.path)
++}
+diff --git a/src/main/startup/desktop-startup-ordering.test.ts b/src/main/startup/desktop-startup-ordering.test.ts
+index af4c7d609cac94820f38b8732154a28af987bcac..3025eef64426cc4e26b33d0c94b7c10acf8c3719 100644
+--- a/src/main/startup/desktop-startup-ordering.test.ts
++++ b/src/main/startup/desktop-startup-ordering.test.ts
+@@ -123,0 +124 @@ describe('startup ordering', () => {
++    expect(desktopStartup).toContain('bindServices: bindTerminalRuntimeStartupServices')
+diff --git a/src/main/startup/headless-pty-hydration-ordering.test.ts b/src/main/startup/headless-pty-hydration-ordering.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2263cdbf94ffc42183ab771a1119e807080790ff
+--- /dev/null
++++ b/src/main/startup/headless-pty-hydration-ordering.test.ts
+@@ -0,0 +1,52 @@
++import { readFileSync } from 'node:fs'
++import { join } from 'node:path'
++import { describe, expect, it } from 'vitest'
++
++describe('headless PTY registry hydration ordering', () => {
++  it('uses exactly one deferred-or-immediate desktop hydration path', () => {
++    const source = readFileSync(
++      join(process.cwd(), 'src/main/window/attach-main-window-services.ts'),
++      'utf8'
++    )
++    const start = source.indexOf('const localPtyProviderStartupReady =')
++    const end = source.indexOf('registerSshHandlers(', start)
++    const hydration = source.slice(start, end)
++
++    expect(start).toBeGreaterThanOrEqual(0)
++    expect(end).toBeGreaterThan(start)
++    expect(hydration).toContain('if (localPtyProviderStartupReady)')
++    expect(hydration).toContain('.then(() => hydrateLocalPtyRegistryAtBoot(store))')
++    expect(hydration).toContain('} else {\n    void hydrateLocalPtyRegistryAtBoot(store)')
++    expect(hydration.match(/hydrateLocalPtyRegistryAtBoot\(store\)/g)).toHaveLength(2)
++  })
++
++  it('hydrates Electron serve after provider and handler readiness but before RPC', () => {
++    const source = readFileSync(join(process.cwd(), 'src/main/index.ts'), 'utf8')
++    const serve = source.indexOf('if (serveOptions) {')
++    const provider = source.indexOf('await localPtyProviderStartupReady', serve)
++    const handlersAndHydration = source.indexOf('await registerHeadlessPtyRuntime(', provider)
++    const rpc = source.indexOf('await runtimeRpc.start()', handlersAndHydration)
++    const readiness = source.indexOf('await printServeReady(serveOptions)', rpc)
++
++    expect(serve).toBeGreaterThanOrEqual(0)
++    expect(provider).toBeGreaterThan(serve)
++    expect(handlersAndHydration).toBeGreaterThan(provider)
++    expect(rpc).toBeGreaterThan(handlersAndHydration)
++    expect(readiness).toBeGreaterThan(rpc)
++  })
++
++  it('hydrates orcad after Store and daemon readiness but before RPC and publication', () => {
++    const source = readFileSync(join(process.cwd(), 'src/main/orcad/orcad-entry.ts'), 'utf8')
++    const store = source.indexOf('const store = new Store(')
++    const daemon = source.indexOf('await startOrcadDaemon()', store)
++    const handlersAndHydration = source.indexOf('await registerHeadlessPtyRuntime(', daemon)
++    const rpc = source.indexOf('await rpc.start()', handlersAndHydration)
++    const readiness = source.indexOf('await new ServeReadinessPublisher().publish(', rpc)
++
++    expect(store).toBeGreaterThanOrEqual(0)
++    expect(daemon).toBeGreaterThan(store)
++    expect(handlersAndHydration).toBeGreaterThan(daemon)
++    expect(rpc).toBeGreaterThan(handlersAndHydration)
++    expect(readiness).toBeGreaterThan(rpc)
++  })
++})
+diff --git a/src/main/startup/serve-desktop-activation-wiring.test.ts b/src/main/startup/serve-desktop-activation-wiring.test.ts
+index 239a761856722bd5031533e48454a093204d5a01..0aea295c6574edc991d4381853109deb11cc8f5a 100644
+--- a/src/main/startup/serve-desktop-activation-wiring.test.ts
++++ b/src/main/startup/serve-desktop-activation-wiring.test.ts
+@@ -24 +24,6 @@ describe('serve desktop activation wiring', () => {
+-    const headlessRegistrationIndex = source.indexOf('registerHeadlessPtyRuntime(', serveIndex)
++    const providerReadyIndex = source.indexOf('await localPtyProviderStartupReady', serveIndex)
++    const headlessRegistrationIndex = source.indexOf(
++      'await registerHeadlessPtyRuntime(',
++      serveIndex
++    )
++    const rpcIndex = source.indexOf('await runtimeRpc.start()', serveIndex)
+@@ -29 +34,3 @@ describe('serve desktop activation wiring', () => {
+-    expect(headlessRegistrationIndex).toBeGreaterThan(ptyReadyIndex)
++    expect(providerReadyIndex).toBeGreaterThan(ptyReadyIndex)
++    expect(headlessRegistrationIndex).toBeGreaterThan(providerReadyIndex)
++    expect(headlessRegistrationIndex).toBeLessThan(rpcIndex)
+diff --git a/src/main/startup/windows-desktop-shell-path-startup.test.ts b/src/main/startup/windows-desktop-shell-path-startup.test.ts
+index 3778e0b2688f9bc925544a494774d68f4b5bdf4e..d38b24aa05eabf6fc5dc8bf999d7757dfae0a24d 100644
+--- a/src/main/startup/windows-desktop-shell-path-startup.test.ts
++++ b/src/main/startup/windows-desktop-shell-path-startup.test.ts
+@@ -12,0 +13,23 @@ describe('Windows desktop shell PATH startup', () => {
++  it('binds the services promise before opening the window while shell PATH is unresolved', () => {
++    const shellPath = deferred()
++    const events: string[] = []
++    const bindServices = vi.fn(() => events.push('bind'))
++    const openWindow = vi.fn(() => events.push('open'))
++    const options = {
++      bindServices,
++      openWindow,
++      shellPathReady: shellPath.promise,
++      startServices: vi.fn(() => ({
++        firstWindowReady: Promise.resolve(),
++        localPtyReady: Promise.resolve(),
++        localPtyProviderReady: Promise.resolve()
++      }))
++    }
++
++    startWindowsDesktopBeforeShellPathReady(options)
++
++    expect(events).toEqual(['bind', 'open'])
++    expect(bindServices).toHaveBeenCalledOnce()
++    expect(options.startServices).not.toHaveBeenCalled()
++  })
++
+@@ -23,0 +47 @@ describe('Windows desktop shell PATH startup', () => {
++      bindServices: vi.fn(),
+diff --git a/src/main/startup/windows-desktop-shell-path-startup.ts b/src/main/startup/windows-desktop-shell-path-startup.ts
+index 3933a79b64b4f542fc0f9ef2060ef35bf3822c9a..3fda3fad16854626697836bbc56d57e99d61f9b6 100644
+--- a/src/main/startup/windows-desktop-shell-path-startup.ts
++++ b/src/main/startup/windows-desktop-shell-path-startup.ts
+@@ -7,0 +8 @@ type WindowsDesktopShellPathStartupOptions<TWindow> = {
++  bindServices: (services: Promise<WindowsDesktopStartupServices>) => void
+@@ -16,0 +18 @@ export function startWindowsDesktopBeforeShellPathReady<TWindow>(
++  options.bindServices(services)
+diff --git a/src/main/window/attach-main-window-services.test.ts b/src/main/window/attach-main-window-services.test.ts
+index 8a340d840ec183a0544443ee5775a998ace18929..ae83f5b771244fc8fce4b6a91b551f8bfbebaa82 100644
+--- a/src/main/window/attach-main-window-services.test.ts
++++ b/src/main/window/attach-main-window-services.test.ts
+@@ -274,2 +274,2 @@ describe('attachMainWindowServices', () => {
+-  it('retries local PTY registry hydration after local startup services are ready', async () => {
+-    const localStartup = deferred()
++  it('hydrates once after the local PTY provider barrier resolves', async () => {
++    const providerStartup = deferred()
+@@ -284 +284 @@ describe('attachMainWindowServices', () => {
+-      { awaitLocalPtyStartup: () => localStartup.promise }
++      { awaitLocalPtyProviderStartup: () => providerStartup.promise }
+@@ -287,2 +287 @@ describe('attachMainWindowServices', () => {
+-    expect(hydrateLocalPtyRegistryAtBootMock).toHaveBeenCalledTimes(1)
+-    expect(hydrateLocalPtyRegistryAtBootMock).toHaveBeenCalledWith(store)
++    expect(hydrateLocalPtyRegistryAtBootMock).not.toHaveBeenCalled()
+@@ -290,2 +289,2 @@ describe('attachMainWindowServices', () => {
+-    localStartup.resolve()
+-    await localStartup.promise
++    providerStartup.resolve()
++    await providerStartup.promise
+@@ -294,2 +293,2 @@ describe('attachMainWindowServices', () => {
+-    expect(hydrateLocalPtyRegistryAtBootMock).toHaveBeenCalledTimes(2)
+-    expect(hydrateLocalPtyRegistryAtBootMock).toHaveBeenLastCalledWith(store)
++    expect(hydrateLocalPtyRegistryAtBootMock).toHaveBeenCalledOnce()
++    expect(hydrateLocalPtyRegistryAtBootMock).toHaveBeenCalledWith(store)
+diff --git a/src/main/window/attach-main-window-services.ts b/src/main/window/attach-main-window-services.ts
+index ce62a6d3da4ae9bc30a06472a751f9d800b33e6e..5910a0016491b4afc862236a13932d511106727c 100644
+--- a/src/main/window/attach-main-window-services.ts
++++ b/src/main/window/attach-main-window-services.ts
+@@ -149,5 +149,3 @@ export function attachMainWindowServices(
+-  // Why: daemon PTYs survive renderer restarts, so at boot they're unregistered; hydrate so they aren't mislabeled REMOTE (idempotent, safe to re-run).
+-  void hydrateLocalPtyRegistryAtBoot(store)
+-  const localPtyStartupReady = options?.awaitLocalPtyStartup?.()
+-  if (localPtyStartupReady) {
+-    void localPtyStartupReady
++  const localPtyProviderStartupReady = options?.awaitLocalPtyProviderStartup?.()
++  if (localPtyProviderStartupReady) {
++    void localPtyProviderStartupReady
+@@ -160,0 +159,2 @@ export function attachMainWindowServices(
++  } else {
++    void hydrateLocalPtyRegistryAtBoot(store)
 diff --git a/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts b/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
-index 81fc23a572..48471093a1 100644
+index 81fc23a5728ef253a52b7b97b032cfa31f5de91e..48471093a1d39587cea605905e99062a92d4b9ae 100644
 --- a/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
 +++ b/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
-@@ -208,6 +208,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
-       paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-       ptyId: 'agent-pty',
-       startupPlan: {},
+@@ -210,0 +211 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +      completionAuthority: 'agent-status',
-       terminalOwnership: {
-         finalize: mockFinalizeTerminalOwnership,
-         release: mockReleaseTerminalOwnership
-@@ -292,7 +293,8 @@ describe('useAutomationDispatchEvents setup launch', () => {
-         runId: 'run-1',
-         status: 'dispatched',
-         workspaceId: 'wt-created',
+@@ -295 +296,2 @@ describe('useAutomationDispatchEvents setup launch', () => {
 -        terminalSessionId: 'agent-tab'
 +        terminalSessionId: 'agent-tab',
 +        completionAuthority: 'agent-status'
-       })
-     )
-   })
-@@ -562,6 +564,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
-         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-         ptyId: 'agent-pty',
-         startupPlan: {},
+@@ -564,0 +567 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
-         terminalOwnership: {
-           finalize: mockFinalizeTerminalOwnership,
-           release: mockReleaseTerminalOwnership
-@@ -570,6 +573,12 @@ describe('useAutomationDispatchEvents setup launch', () => {
-     })
- 
-     await registerAndDispatch()
+@@ -572,0 +576,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
 +      expect.objectContaining({
 +        status: 'dispatched',
 +        completionAuthority: 'agent-status'
 +      })
 +    )
-     launchArgs.onAgentStatus?.({ state: 'done' })
-     await vi.waitFor(() => expect(mockFinalizeTerminalOwnership).toHaveBeenCalledOnce())
- 
-@@ -602,6 +611,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
-         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-         ptyId: 'agent-pty',
-         startupPlan: {},
+@@ -604,0 +614 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
-         terminalOwnership: {
-           finalize: mockFinalizeTerminalOwnership,
-           release: mockReleaseTerminalOwnership
-@@ -746,18 +756,20 @@ describe('useAutomationDispatchEvents setup launch', () => {
-     )
-   })
- 
+@@ -749 +759 @@ describe('useAutomationDispatchEvents setup launch', () => {
 -  it('consumes duplicate done and zero-exit completion through one finalizer', async () => {
 +  it('ignores one-shot agent done and completes only from zero process exit', async () => {
-     let launchArgs: {
-       onAgentStatus?: (payload: { state: string }) => void
-       onExit?: (ptyId: string, code: number) => void
-     } = {}
-     mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
-       launchArgs = args
+@@ -755,0 +766 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +      args.onAgentStatus?.({ state: 'done' })
-       return {
-         tabId: 'agent-tab',
-         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-         ptyId: 'agent-pty',
-         startupPlan: {},
+@@ -760,0 +772 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'process-exit',
-         terminalOwnership: {
-           finalize: mockFinalizeTerminalOwnership,
-           release: mockReleaseTerminalOwnership
-@@ -766,7 +778,17 @@ describe('useAutomationDispatchEvents setup launch', () => {
-     })
- 
-     await registerAndDispatch()
+@@ -768,0 +781,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
 +      expect.objectContaining({
 +        status: 'dispatched',
 +        completionAuthority: 'process-exit'
 +      })
 +    )
-     launchArgs.onAgentStatus?.({ state: 'done' })
+@@ -769,0 +788,4 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
 +    expect(
 +      mockMarkDispatchResult.mock.calls.filter(([result]) => result.status === 'completed')
 +    ).toHaveLength(0)
-     launchArgs.onExit?.('agent-pty', 0)
-     launchArgs.onAgentStatus?.({ state: 'done' })
-     await vi.waitFor(() => expect(mockFinalizeTerminalOwnership).toHaveBeenCalledOnce())
-@@ -788,6 +810,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
-         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-         ptyId: 'agent-pty',
-         startupPlan: {},
+@@ -790,0 +813 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
-         terminalOwnership: {
-           finalize: mockFinalizeTerminalOwnership,
-           release: mockReleaseTerminalOwnership
-@@ -829,6 +852,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
-         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-         ptyId: 'agent-pty',
-         startupPlan: {},
+@@ -831,0 +855 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
-         terminalOwnership: {
-           finalize: mockFinalizeTerminalOwnership,
-           release: mockReleaseTerminalOwnership
-@@ -857,6 +881,7 @@ describe('useAutomationDispatchEvents setup launch', () => {
-         paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-         ptyId: 'agent-pty',
-         startupPlan: {},
+@@ -859,0 +884 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
-         terminalOwnership: {
-           finalize: mockFinalizeTerminalOwnership,
-           release: mockReleaseTerminalOwnership
 diff --git a/src/renderer/src/hooks/useAutomationDispatchEvents.ts b/src/renderer/src/hooks/useAutomationDispatchEvents.ts
-index 1e46b315f2..4ba37d82ed 100644
+index 1e46b315f281780857fb1c79470f0882845c5803..4ba37d82ed722418a9ac1393f6ce334a9bb18d5a 100644
 --- a/src/renderer/src/hooks/useAutomationDispatchEvents.ts
 +++ b/src/renderer/src/hooks/useAutomationDispatchEvents.ts
-@@ -345,6 +345,7 @@ export function useAutomationDispatchEvents(): void {
-           let dispatchMarked = false
-           let pendingExitCode: number | null = null
-           let pendingDone = false
+@@ -347,0 +348 @@ export function useAutomationDispatchEvents(): void {
 +          let freshCompletionAuthority: 'pending' | 'agent-status' | 'process-exit' = 'pending'
-           let completionMarked = false
-           let unsubscribeAgentStatus = (): void => {}
-           let unsubscribeSessionObserver = (): void => {}
-@@ -443,6 +444,15 @@ export function useAutomationDispatchEvents(): void {
-             }
-             settleLateResult(markCompletionResult())
-           }
+@@ -445,0 +447,9 @@ export function useAutomationDispatchEvents(): void {
 +          const handleFreshAgentDone = (): void => {
 +            if (freshCompletionAuthority === 'pending') {
 +              pendingDone = true
@@ -577,91 +1786,40 @@ index 1e46b315f2..4ba37d82ed 100644
 +              handleAgentDone()
 +            }
 +          }
-           const observeAgentStatus = (
-             targetPaneKey: string,
-             startedAfter: number,
-@@ -577,6 +587,7 @@ export function useAutomationDispatchEvents(): void {
-                       terminalSessionId: reusableSession.tabId,
-                       terminalPaneKey: reusableSession.paneKey,
-                       terminalPtyId: reusableSession.ptyId,
+@@ -579,0 +590 @@ export function useAutomationDispatchEvents(): void {
 +                      completionAuthority: 'agent-status',
-                       precheckResult,
-                       error: null
-                     })
-@@ -601,6 +612,7 @@ export function useAutomationDispatchEvents(): void {
-             prompt: automation.prompt,
-             launchSource: 'unknown',
-             title: run.title,
+@@ -603,0 +615 @@ export function useAutomationDispatchEvents(): void {
 +            oneShot: !automation.reuseSession,
-             onData: (chunk) => {
-               outputSnapshotBuffer.append(chunk)
-             },
-@@ -611,7 +623,7 @@ export function useAutomationDispatchEvents(): void {
-               if (payload.state !== 'done' || payload.sessionBoundary === true) {
-                 return
-               }
+@@ -614 +626 @@ export function useAutomationDispatchEvents(): void {
 -              handleAgentDone()
 +              handleFreshAgentDone()
-             },
-             onExit: (_ptyId, code) => {
-               if (completionMarked) {
-@@ -628,13 +640,19 @@ export function useAutomationDispatchEvents(): void {
-             throw new Error('Unable to build an agent launch plan.')
-           }
-           terminalOwnership = result.terminalOwnership
+@@ -630,0 +643,4 @@ export function useAutomationDispatchEvents(): void {
 +          freshCompletionAuthority = result.completionAuthority ?? 'agent-status'
 +          if (freshCompletionAuthority === 'process-exit') {
 +            pendingDone = false
 +          }
-           if (automation.reuseSession) {
-             // Why: the first fresh launch is the seed for later reuse and must
-             // survive completion under the same policy as an already-reused tab.
-             releaseTerminalOwnership()
-           }
-           const launchedTabId = result.tabId
+@@ -637 +653,3 @@ export function useAutomationDispatchEvents(): void {
 -          observeAgentStatus(result.paneKey, dispatchStartedAt)
 +          if (freshCompletionAuthority === 'agent-status') {
 +            observeAgentStatus(result.paneKey, dispatchStartedAt)
 +          }
-           try {
-             await markDispatchResult({
-               runId: run.id,
-@@ -644,11 +662,12 @@ export function useAutomationDispatchEvents(): void {
-               terminalSessionId: launchedTabId,
-               terminalPaneKey: result.paneKey,
-               terminalPtyId: result.ptyId,
+@@ -646,0 +665 @@ export function useAutomationDispatchEvents(): void {
 +              completionAuthority: freshCompletionAuthority,
-               precheckResult,
-               error: null
-             })
-             dispatchMarked = true
+@@ -651 +670 @@ export function useAutomationDispatchEvents(): void {
 -            if (pendingDone) {
 +            if (pendingDone && freshCompletionAuthority === 'agent-status') {
-               await markCompletionResult()
-             } else if (pendingExitCode !== null) {
-               await markExitResult(pendingExitCode)
 diff --git a/src/renderer/src/lib/agent-background-session-contract.ts b/src/renderer/src/lib/agent-background-session-contract.ts
-index 26145d313d..d605418c7c 100644
+index 26145d313ddbe3eb0d00a3549e4745d125361d00..d605418c7c97c3635d251b5d3fca66d8a0b1a1fd 100644
 --- a/src/renderer/src/lib/agent-background-session-contract.ts
 +++ b/src/renderer/src/lib/agent-background-session-contract.ts
-@@ -13,6 +13,8 @@ export type LaunchAgentBackgroundSessionArgs = {
-   onData?: (chunk: string) => void
-   onExit?: (ptyId: string, code: number) => void
-   onAgentStatus?: (payload: ParsedAgentStatusPayload) => void
+@@ -15,0 +16,2 @@ export type LaunchAgentBackgroundSessionArgs = {
 +  /** Automation-only native one-shot launch; interactive/reuse sessions omit this. */
 +  oneShot?: boolean
- }
- 
- export type LaunchAgentBackgroundSessionResult = {
-@@ -21,4 +23,5 @@ export type LaunchAgentBackgroundSessionResult = {
-   ptyId: string
-   startupPlan: AgentStartupPlan
-   terminalOwnership: AutomationTerminalOwnership | null
+@@ -23,0 +26 @@ export type LaunchAgentBackgroundSessionResult = {
 +  completionAuthority: 'agent-status' | 'process-exit'
- }
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.test.ts b/src/renderer/src/lib/automation-one-shot-startup.test.ts
 new file mode 100644
-index 0000000000..5b3c94ce59
+index 0000000000000000000000000000000000000000..5b3c94ce59576a542760fbc6a758c1dcdb90f429
 --- /dev/null
 +++ b/src/renderer/src/lib/automation-one-shot-startup.test.ts
 @@ -0,0 +1,121 @@
@@ -788,7 +1946,7 @@ index 0000000000..5b3c94ce59
 +})
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.ts b/src/renderer/src/lib/automation-one-shot-startup.ts
 new file mode 100644
-index 0000000000..e4968870db
+index 0000000000000000000000000000000000000000..e4968870dbd86dcf85309a828acb0faf12dc90a1
 --- /dev/null
 +++ b/src/renderer/src/lib/automation-one-shot-startup.ts
 @@ -0,0 +1,181 @@
@@ -974,46 +2132,19 @@ index 0000000000..e4968870db
 +  }
 +}
 diff --git a/src/renderer/src/lib/launch-agent-background-session.test.ts b/src/renderer/src/lib/launch-agent-background-session.test.ts
-index 42df833288..2cc27fc2a4 100644
+index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3c0b532c7 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.test.ts
 +++ b/src/renderer/src/lib/launch-agent-background-session.test.ts
-@@ -28,6 +28,7 @@ const mockPasteDraftWhenAgentReady = vi.fn()
- const mockMarkTrusted = vi.fn()
- const mockDispatchEvent = vi.fn()
- const mockGetAgentLaunchPlatformForRepo = vi.fn<() => NodeJS.Platform>()
+@@ -30,0 +31 @@ const mockGetAgentLaunchPlatformForRepo = vi.fn<() => NodeJS.Platform>()
 +const mockGetClientLoginShell = vi.fn(() => '/bin/zsh')
- const state = createAgentBackgroundSessionTestState({
-   createTab: mockCreateTab,
-   setTabCustomTitle: mockSetTabCustomTitle,
-@@ -36,6 +37,7 @@ const state = createAgentBackgroundSessionTestState({
-   setTabLayout: mockSetTabLayout,
-   registerAgentLaunchConfig: mockRegisterAgentLaunchConfig
- })
+@@ -38,0 +40 @@ const state = createAgentBackgroundSessionTestState({
 +
- let currentStoreState = state
- 
- vi.mock('@/store', () => ({
-@@ -45,6 +47,8 @@ vi.mock('@/store', () => ({
-   }
- }))
- 
+@@ -47,0 +50,2 @@ vi.mock('@/store', () => ({
 +vi.mock('@/lib/client-login-shell', () => ({ getClientLoginShell: mockGetClientLoginShell }))
 +
- vi.mock('@/lib/telemetry', () => ({
-   track: vi.fn(),
-   tuiAgentToAgentKind: (agent: string) => agent
-@@ -69,6 +73,7 @@ vi.mock('@/components/terminal-pane/pty-data-sidecar-subscriptions', () => ({
- 
- describe('launchAgentBackgroundSession', () => {
-   beforeEach(() => {
+@@ -71,0 +76 @@ describe('launchAgentBackgroundSession', () => {
 +    mockGetClientLoginShell.mockReturnValue('/bin/zsh')
-     currentStoreState = state
-     resetAgentBackgroundSessionTestHarness({
-       state,
-@@ -90,6 +95,50 @@ describe('launchAgentBackgroundSession', () => {
-     })
-   })
- 
+@@ -92,0 +98,44 @@ describe('launchAgentBackgroundSession', () => {
 +  it('launches Antigravity automation as native one-shot and makes process exit authoritative', async () => {
 +    Object.assign(state.settings, {
 +      agentDefaultArgs: { antigravity: '--model claude-sonnet-4-6 --print-timeout 10m' }
@@ -1058,55 +2189,24 @@ index 42df833288..2cc27fc2a4 100644
 +    expect(result?.completionAuthority).toBe('process-exit')
 +  })
 +
-   it('spawns a PTY first and creates the inactive tab already bound to it', async () => {
-     const { launchAgentBackgroundSession } = await import('./launch-agent-background-session')
-     mockSpawn.mockResolvedValue({ id: 'pty-1', incarnationId: 'inc-fresh' })
 diff --git a/src/renderer/src/lib/launch-agent-background-session.ts b/src/renderer/src/lib/launch-agent-background-session.ts
-index a1d9f1df65..2869ec47c5 100644
+index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..2869ec47c573de223615a7636f13d330af482dcf 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.ts
 +++ b/src/renderer/src/lib/launch-agent-background-session.ts
-@@ -1,9 +1,9 @@
- import { useAppStore } from '@/store'
+@@ -2 +1,0 @@ import { useAppStore } from '@/store'
 -import { buildAgentStartupPlan } from '@/lib/tui-agent-startup'
- import type {
-   LaunchAgentBackgroundSessionArgs,
-   LaunchAgentBackgroundSessionResult
- } from '@/lib/agent-background-session-contract'
+@@ -6,0 +6 @@ import type {
 +import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
- import { tuiAgentToAgentKind } from '@/lib/telemetry'
- import { scheduleAgentBackgroundDraft } from '@/lib/agent-background-draft-delivery'
- import { requestBackgroundTerminalWorktreeMount } from '@/components/terminal/background-terminal-worktree-mount'
-@@ -31,7 +31,6 @@ import {
- import { createSshBackgroundStartupDelivery } from '@/lib/ssh-background-startup-delivery'
- import { shouldUseShellReadyStartupDelivery } from '../../../shared/codex-startup-delivery'
- import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-pane/terminal-side-effect-facts-handler'
+@@ -34 +33,0 @@ import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-p
 -import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
- import { runBestEffortAgentBackgroundCleanups } from '@/lib/agent-background-session-cleanup'
- import type { bindAutomationTerminal } from '@/lib/automation-terminal-ownership'
- import {
-@@ -53,7 +52,7 @@ export async function launchAgentBackgroundSession(
-     throw new Error('The target workspace is no longer available.')
-   }
-   const cmdOverrides = store.settings?.agentCmdOverrides ?? {}
+@@ -56 +55 @@ export async function launchAgentBackgroundSession(
 -  const agentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
 +  const defaultAgentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
-   const agentEnv = resolveTuiAgentLaunchEnv(agent, store.settings?.agentDefaultEnv)
-   // Folder launch ownership cannot be derived from a repo row (#2989).
-   const launchHost = resolveAgentBackgroundLaunchHost({
-@@ -62,6 +61,9 @@ export async function launchAgentBackgroundSession(
-     worktreePath: worktree.path,
-     repo
-   })
+@@ -64,0 +64,3 @@ export async function launchAgentBackgroundSession(
 +  const runtimeTarget = getActiveRuntimeTarget(
 +    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 +  )
-   const preflight = requireTuiAgentConfig(agent).preflightTrust
-   if (preflight && worktree.path && window.api.agentTrust?.markTrusted) {
-     try {
-@@ -74,31 +76,22 @@ export async function launchAgentBackgroundSession(
-       // Best-effort: the user can still accept the trust prompt.
-     }
-   }
+@@ -77,12 +79 @@ export async function launchAgentBackgroundSession(
 -  const { platform: launchPlatform, isRemote } = launchHost
 -  const startupShell = resolveLocalWindowsAgentStartupShell({
 -    platform: launchPlatform,
@@ -1120,13 +2220,13 @@ index a1d9f1df65..2869ec47c5 100644
 -  const pasteDraftAfterLaunch = hasPrompt && isFollowupPath ? trimmedPrompt : null
 -  const startupPlan = buildAgentStartupPlan({
 +  const startup = buildAutomationBackgroundStartup({
-     agent,
+@@ -90 +81 @@ export async function launchAgentBackgroundSession(
 -    prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',
 +    prompt,
-     cmdOverrides,
+@@ -92 +83 @@ export async function launchAgentBackgroundSession(
 -    agentArgs,
 +    agentArgs: defaultAgentArgs,
-     agentEnv,
+@@ -94,4 +85,5 @@ export async function launchAgentBackgroundSession(
 -    platform: launchPlatform,
 -    shell: startupShell,
 -    isRemote,
@@ -1136,65 +2236,33 @@ index a1d9f1df65..2869ec47c5 100644
 +    worktreePath: worktree.path,
 +    terminalWindowsShell: store.settings?.terminalWindowsShell,
 +    oneShotRequested: args.oneShot
-   })
+@@ -99 +91 @@ export async function launchAgentBackgroundSession(
 -  if (!startupPlan) {
 +  if (!startup) {
-     return null
-   }
+@@ -101,0 +94 @@ export async function launchAgentBackgroundSession(
 +  const startupPlan = startup.plan
- 
-   // A hidden run tab must never be store-visible without its PTY (#2989).
-   const { reservedTabId, leafId, launchToken, launchRegistration, paneEnv } =
-@@ -121,10 +114,6 @@ export async function launchAgentBackgroundSession(
-       }),
-     write: (ptyId, data) => window.api.pty.write(ptyId, data)
-   })
+@@ -124,4 +116,0 @@ export async function launchAgentBackgroundSession(
 -  // Route by the worktree's owner host, not the focused runtime.
 -  const runtimeTarget = getActiveRuntimeTarget(
 -    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 -  )
-   let ptyId = '',
-     runtimeTerminalHandle: string | null = null
-   // What the local spawn answered and later steps still need: which lifetime of `ptyId` this launch
-@@ -181,7 +170,9 @@ export async function launchAgentBackgroundSession(
-         tabId: reservedTabId,
-         leafId,
-         agent,
+@@ -184 +173,3 @@ export async function launchAgentBackgroundSession(
 -        ...(hasPrompt && !isFollowupPath ? { prompt: trimmedPrompt } : {}),
 +        ...(startup.hasPrompt && !startup.isFollowupPath && !startup.oneShot.enabled
 +          ? { prompt: startup.trimmedPrompt }
 +          : {}),
-         ...(startupPlan.sessionOptions ? { sessionOptions: startupPlan.sessionOptions } : {}),
-         legacy: {
-           command: startupPlan.launchCommand,
-@@ -246,7 +237,7 @@ export async function launchAgentBackgroundSession(
-     tab = adopted.tab
-     paneKey = adopted.paneKey
-     terminalOwnership = adopted.terminalOwnership
+@@ -249 +240 @@ export async function launchAgentBackgroundSession(
 -    if (agent === 'command-code' && hasPrompt && !isFollowupPath) {
 +    if (agent === 'command-code' && startup.hasPrompt && !startup.isFollowupPath) {
-       // Why: Command Code does not expose a prompt-start hook; seed working for
-       // hidden prompt launches so sidebar/activity surfaces do not stay idle.
-       const routing = agentStatusConsumer.resolveRouting()
-@@ -254,7 +245,7 @@ export async function launchAgentBackgroundSession(
-         const observation = agentStatusConsumer.observeLaunchIngress()
-         store.setAgentStatus(
-           paneKey,
+@@ -257 +248 @@ export async function launchAgentBackgroundSession(
 -          { state: 'working', prompt: trimmedPrompt, agentType: agent, observation },
 +          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent, observation },
-           undefined,
-           undefined,
-           routing,
-@@ -297,11 +288,18 @@ export async function launchAgentBackgroundSession(
-     // can double-spawn, while later tracking can miss user takeover.
-     requestBackgroundTerminalWorktreeMount({ worktreeId, tabIds: [tab.id] })
- 
+@@ -300,2 +291,2 @@ export async function launchAgentBackgroundSession(
 -    if (pasteDraftAfterLaunch !== null) {
 -      scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
 +    if (startup.pasteDraftAfterLaunch !== null) {
 +      scheduleAgentBackgroundDraft(tab.id, startup.pasteDraftAfterLaunch, agent)
-     }
- 
+@@ -304 +295,8 @@ export async function launchAgentBackgroundSession(
 -    return { tabId: tab.id, paneKey, ptyId, startupPlan, terminalOwnership }
 +    return {
 +      tabId: tab.id,
@@ -1204,48 +2272,25 @@ index a1d9f1df65..2869ec47c5 100644
 +      terminalOwnership,
 +      completionAuthority: startup.completionAuthority
 +    }
-   } catch (error) {
-     // Why: terminal creation and stream subscription are separate remote calls.
-     // A failure between them must not strand an invisible runtime terminal.
 diff --git a/src/shared/automations-types.ts b/src/shared/automations-types.ts
-index 24d9345242..df15fa6156 100644
+index 24d9345242d447288029f6a2f8cbab358d84eb85..df15fa61566f67981d4261e80f0b24dca23fd554 100644
 --- a/src/shared/automations-types.ts
 +++ b/src/shared/automations-types.ts
-@@ -152,6 +152,10 @@ export type AutomationRun = {
-    *  run reopening must target the pane that actually executed the run. */
-   terminalPaneKey: string | null
-   terminalPtyId: string | null
+@@ -154,0 +155,4 @@ export type AutomationRun = {
 +  /** Completion authority selected by the launch plan for this exact run.
 +   *  Missing on older records and runtimes; consumers must fail safe to
 +   *  agent-status rather than assuming the process is disposable. */
 +  completionAuthority?: AutomationRunCompletionAuthority
-   outputSnapshot: AutomationRunOutputSnapshot | null
-   precheckResult: AutomationPrecheckResult | null
-   usage: AutomationRunUsage | null
-@@ -231,12 +235,15 @@ export type AutomationDispatchResult = {
-   terminalSessionId?: string | null
-   terminalPaneKey?: string | null
-   terminalPtyId?: string | null
+@@ -233,0 +238 @@ export type AutomationDispatchResult = {
 +  completionAuthority?: AutomationRunCompletionAuthority
-   outputSnapshot?: AutomationRunOutputSnapshot | null
-   precheckResult?: AutomationPrecheckResult | null
-   usage?: AutomationRunUsage | null
-   error?: string | null
- }
- 
+@@ -239,0 +245,2 @@ export type AutomationDispatchResult = {
 +export type AutomationRunCompletionAuthority = 'agent-status' | 'process-exit'
 +
- export type ExternalAutomationProvider = 'hermes' | 'openclaw'
- export type ExternalAutomationManagerStatus = 'available' | 'unavailable'
- export type ExternalAutomationAction = 'pause' | 'resume' | 'run' | 'delete'
 diff --git a/src/shared/tui-agent-startup.test.ts b/src/shared/tui-agent-startup.test.ts
-index 12c9f56e27..1cc94330e4 100644
+index 12c9f56e270fc032cc621df2eaddea2c585d320c..1cc94330e44b316cb7b50647c5beda8fc9737bd7 100644
 --- a/src/shared/tui-agent-startup.test.ts
 +++ b/src/shared/tui-agent-startup.test.ts
-@@ -947,4 +947,19 @@ describe('tui agent startup plans', () => {
-   it('appends Devin default permission-mode bypass before stdin prompt delivery', () => {
-     expect(resolveTuiAgentLaunchArgs('devin', null)).toBe('--permission-mode bypass')
-   })
+@@ -949,0 +950,15 @@ describe('tui agent startup plans', () => {
 +
 +  it('allows automation to use Antigravity native one-shot prompt without changing TUI defaults', () => {
 +    const plan = buildAgentStartupPlan({
@@ -1261,80 +2306,31 @@ index 12c9f56e27..1cc94330e4 100644
 +    expect(plan?.launchCommand).toBe("agy '--model' 'claude-sonnet-4-6' --prompt 'audit now'")
 +    expect(TUI_AGENT_CONFIG.antigravity.promptInjectionMode).toBe('flag-prompt-interactive')
 +  })
- })
 diff --git a/src/shared/tui-agent-startup.ts b/src/shared/tui-agent-startup.ts
-index 7b013c4ffd..19d1733bd2 100644
+index 7b013c4ffd75fcde1add8da6eeffbf513037edb4..19d1733bd2f2a9c36112d78ee7d4f1776bd75085 100644
 --- a/src/shared/tui-agent-startup.ts
 +++ b/src/shared/tui-agent-startup.ts
-@@ -12,7 +12,7 @@ import {
-   resolveStartupShell,
-   type AgentStartupShell
- } from './tui-agent-startup-shell'
+@@ -15 +15 @@ import {
 -import { TUI_AGENT_CONFIG } from './tui-agent-config'
 +import { TUI_AGENT_CONFIG, type AgentPromptInjectionMode } from './tui-agent-config'
- import type { StartupCommandDelivery } from './codex-startup-delivery'
- import { buildSleepingAgentLaunchConfig } from './sleeping-agent-launch-config'
- import { planHermesStartupQuery } from './hermes-startup-query'
-@@ -50,6 +50,7 @@ export function buildAgentStartupPlan(args: {
-   allowEmptyPromptLaunch?: boolean
-   agentArgs?: string | null
-   agentEnv?: Record<string, string> | null
+@@ -52,0 +53 @@ export function buildAgentStartupPlan(args: {
 +  promptInjectionModeOverride?: AgentPromptInjectionMode
-   sessionOptions?: Record<string, SessionOptionValue>
-   sessionOptionsOverrideAgentArgs?: boolean
-   /** Why: SSH remotes deploy the CLI shim as plain `orca`, so the Linux-only
-@@ -60,7 +61,8 @@ export function buildAgentStartupPlan(args: {
-   const shell = resolveStartupShell(platform, args.shell)
-   const trimmedPrompt = prompt.trim()
-   const config = TUI_AGENT_CONFIG[agent]
+@@ -63 +64,2 @@ export function buildAgentStartupPlan(args: {
 -  const usesQuery = config.promptInjectionMode === 'hermes-query' && Boolean(trimmedPrompt)
 +  const promptInjectionMode = args.promptInjectionModeOverride ?? config.promptInjectionMode
 +  const usesQuery = promptInjectionMode === 'hermes-query' && Boolean(trimmedPrompt)
-   const baseCommand = resolveAgentLaunchCommand({
-     agent,
-     cmdOverrides,
-@@ -98,7 +100,7 @@ export function buildAgentStartupPlan(args: {
- 
-   const quotedPrompt = quoteStartupArg(trimmedPrompt, shell)
- 
+@@ -101 +103 @@ export function buildAgentStartupPlan(args: {
 -  if (config.promptInjectionMode === 'argv') {
 +  if (promptInjectionMode === 'argv') {
-     const promptSeparator = config.argvPromptSeparator ? ` ${config.argvPromptSeparator}` : ''
-     return {
-       agent,
-@@ -112,7 +114,7 @@ export function buildAgentStartupPlan(args: {
-     }
-   }
- 
+@@ -115 +117 @@ export function buildAgentStartupPlan(args: {
 -  if (config.promptInjectionMode === 'flag-prompt') {
 +  if (promptInjectionMode === 'flag-prompt') {
-     return {
-       agent,
-       launchCommand: `${baseCommand.command} --prompt ${quotedPrompt}`,
-@@ -124,7 +126,7 @@ export function buildAgentStartupPlan(args: {
-     }
-   }
- 
+@@ -127 +129 @@ export function buildAgentStartupPlan(args: {
 -  if (config.promptInjectionMode === 'hermes-query') {
 +  if (promptInjectionMode === 'hermes-query') {
-     const queryPlan = planHermesStartupQuery({
-       baseCommand: baseCommand.command,
-       agentArgs: args.agentArgs,
-@@ -150,7 +152,7 @@ export function buildAgentStartupPlan(args: {
-     }
-   }
- 
+@@ -153 +155 @@ export function buildAgentStartupPlan(args: {
 -  if (config.promptInjectionMode === 'flag-prompt-interactive') {
 +  if (promptInjectionMode === 'flag-prompt-interactive') {
-     return {
-       agent,
-       launchCommand: `${baseCommand.command} --prompt-interactive ${quotedPrompt}`,
-@@ -162,7 +164,7 @@ export function buildAgentStartupPlan(args: {
-     }
-   }
- 
+@@ -165 +167 @@ export function buildAgentStartupPlan(args: {
 -  if (config.promptInjectionMode === 'flag-interactive') {
 +  if (promptInjectionMode === 'flag-interactive') {
-     return {
-       agent,
-       launchCommand: `${baseCommand.command} -i ${quotedPrompt}`,
