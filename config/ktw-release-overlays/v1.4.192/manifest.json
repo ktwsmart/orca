@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "name": "KTW Orca v1.4.192 one-shot 與 completion 相容層",
-  "generatedBy": "Codex 2026-08-31 09:20 +0800",
+  "generatedBy": "Codex 2026-08-31 10:19 +0800",
   "officialVersion": "1.4.192",
   "officialBaseSha": "ce4df07736baa38d742613bd68d5a3d845f79d25",
   "patchFile": "0001-KTW-one-shot與completion相容層.patch",
   "patchApplyMode": "unidiff-zero",
-  "patchSha256": "5e114519bbfd8b25f778ca54818634a5bc169235365607dee7dd85264593f348",
-  "outputTreeSha": "3b5777c6c7d29e09b52bd1d9e95b2da9164887f1",
+  "patchSha256": "7a958b54c782606c30df8906af83e4371e8214f1cde0373760123ddcb35a8821",
+  "outputTreeSha": "7f210723c73b233665058e49c72d60f3e903835e",
   "sourceCommits": [
     "d2d981c424b4c3f10d1cedc7581cd8c8c53d0b03",
     "acf807102762fdc8420cad0080ca341a58d4d618",
@@ -18,7 +18,8 @@
     "652b21a7e248fdfbbf40b4e21b07932337b30a3f",
     "afcc471cf54194c346ce7cc5a7f9ac990dd1b84e",
     "69afbeea86b0efa328283d30ec49031a90a7487d",
-    "3457acb6476af0b71e8d66b3664cf468a89aa4c3"
+    "3457acb6476af0b71e8d66b3664cf468a89aa4c3",
+    "4cb013c0a9251275fa3d20ea33b45429e07aa6be"
   ],
   "allowedPaths": [
     "src/main/automations/run-completion-watcher.test.ts",
@@ -26,8 +27,12 @@
     "src/main/automations/runtime-terminal-run-observer.test.ts",
     "src/main/automations/runtime-terminal-run-observer.ts",
     "src/main/index.ts",
+    "src/main/ipc/pty-startup-swap-window-presence.test.ts",
+    "src/main/ipc/pty/ipc/inspect.ts",
     "src/main/ipc/pty/register-headless-runtime.test.ts",
     "src/main/ipc/pty/register-headless-runtime.ts",
+    "src/main/ipc/pty/runtime/controller.ts",
+    "src/main/ipc/pty/runtime/operations.ts",
     "src/main/memory/hydrate-local-pty-registry.test.ts",
     "src/main/memory/hydrate-local-pty-registry.ts",
     "src/main/orcad/orcad-entry.ts",
