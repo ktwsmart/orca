@@ -25,7 +25,7 @@ describe('KTW release overlay verifier', () => {
   it('binds the checked-in patch hash and exact path allowlist', () => {
     const result = verifyOverlayFiles(MANIFEST_PATH)
     expect(result.patchPaths).toEqual(result.manifest.allowedPaths)
-    expect(result.patchPaths).toHaveLength(31)
+    expect(result.patchPaths).toHaveLength(35)
     expect(result.manifest.patchApplyMode).toBe('unidiff-zero')
   })
 
@@ -51,7 +51,7 @@ describe('KTW release overlay verifier', () => {
       'utf8'
     )
     const preimages = extractFullIndexPreimages(patch)
-    expect(preimages.size).toBe(31)
+    expect(preimages.size).toBe(35)
     expect([...preimages.values()].every((sha) => /^[0-9a-f]{40}$/.test(sha))).toBe(true)
     expect(() =>
       extractFullIndexPreimages('diff --git a/a.ts b/a.ts\nindex 1234..5678 100644\n')
@@ -65,7 +65,7 @@ describe('KTW release overlay verifier', () => {
     'materializes the checked-in zero-context patch to the exact output tree',
     () => {
       const result = verifyKtwReleaseOverlay(process.cwd(), MANIFEST_PATH)
-      expect(result.outputTreeSha).toBe('3b5777c6c7d29e09b52bd1d9e95b2da9164887f1')
+      expect(result.outputTreeSha).toBe('7f210723c73b233665058e49c72d60f3e903835e')
     }
   )
 
