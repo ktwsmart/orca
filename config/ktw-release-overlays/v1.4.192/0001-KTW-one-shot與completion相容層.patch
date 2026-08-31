@@ -341,6 +341,335 @@ index 39d27bada72edef3664d08f669b0ff98f17c1043..2bc9e153e9454584ca7812adf559b158
 -    registerHeadlessPtyRuntime(
 +    await localPtyProviderStartupReady
 +    await registerHeadlessPtyRuntime(
+diff --git a/src/main/ipc/pty-startup-swap-window-presence.test.ts b/src/main/ipc/pty-startup-swap-window-presence.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..681208175a1d8ac953e23df64c0d5c999c72583a
+--- /dev/null
++++ b/src/main/ipc/pty-startup-swap-window-presence.test.ts
+@@ -0,0 +1,288 @@
++import { describe, expect, it, vi } from 'vitest'
++import { makeDeferred } from './pty-ipc-test-constants'
++import { setupPtyIpcSuite } from './pty-ipc-test-harness'
++import { registerPtyHandlers, registerSshPtyProvider } from './pty'
++import { ptyOwnership } from './pty/provider/ownership-state'
++
++vi.mock('electron', () => import('./pty-ipc-mock-registry').then((m) => m.electronModuleMock()))
++vi.mock('fs', () => import('./pty-ipc-mock-registry').then((m) => m.fsModuleMock()))
++vi.mock('node-pty', () => import('./pty-ipc-mock-registry').then((m) => m.nodePtyModuleMock()))
++vi.mock('node:child_process', async (importOriginal) =>
++  (await import('./pty-ipc-mock-registry')).childProcessModuleMock(await importOriginal())
++)
++vi.mock('../opencode/hook-service', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.openCodeHookServiceModuleMock())
++)
++vi.mock('../mimo/hook-service', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.mimoHookServiceModuleMock())
++)
++vi.mock('../agent-hooks/server', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.agentHookServerModuleMock())
++)
++vi.mock('../pi/titlebar-extension-service', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.piTitlebarExtensionModuleMock())
++)
++vi.mock('../pwsh', () => import('./pty-ipc-mock-registry').then((m) => m.pwshModuleMock()))
++vi.mock('../wsl', async (importOriginal) =>
++  (await import('./pty-ipc-mock-registry')).wslModuleMock(await importOriginal())
++)
++vi.mock('../telemetry/client', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.telemetryClientModuleMock())
++)
++vi.mock('../telemetry/classify-error', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.classifyErrorModuleMock())
++)
++vi.mock('../cli/linux-terminal-orca-cli-shim', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.linuxCliShimModuleMock())
++)
++vi.mock('../memory/pty-registry', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.ptyRegistryModuleMock())
++)
++vi.mock('../agent-hooks/migration-unsupported-pty-state', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.migrationUnsupportedPtyModuleMock())
++)
++vi.mock('../codex/codex-pane-account-registry', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.codexPaneAccountRegistryModuleMock())
++)
++vi.mock('../codex/codex-state-db-backfill-recovery', () =>
++  import('./pty-ipc-mock-registry').then((m) => m.codexBackfillRecoveryModuleMock())
++)
++
++// During the cold-start daemon swap the installed local provider is still the plain
++// in-process LocalPtyProvider; it does not own daemon-restored PTY ids, so its
++// "no PTY" is fabricated, not observed. A confident false here tears down live
++// panes (shouldReconcileMissingSession reconciles ONLY on false) and blocks
++// input-undeliverable remount recovery. These suites pin: while the swap is in
++// flight the presence answer is deferred (IPC) or unverifiable-null (sync), and
++// the post-swap owner's answer is the one that lands.
++describe('registerPtyHandlers daemon-swap-window presence', () => {
++  const { handlers, mainWindow, installDaemonTestProvider } = setupPtyIpcSuite()
++
++  const registerWithStartupBarrier = (
++    barrier: Promise<void>,
++    runtime?: Record<string, unknown>
++  ): void => {
++    registerPtyHandlers(
++      mainWindow as never,
++      runtime as never,
++      undefined,
++      undefined,
++      undefined,
++      undefined,
++      { awaitLocalPtyProviderStartup: () => barrier }
++    )
++  }
++
++  const installRuntimeControllerWithBarrier = (
++    barrier: Promise<void>
++  ): { hasPty: (ptyId: string) => boolean | null } => {
++    let controller: { hasPty: (ptyId: string) => boolean | null } | undefined
++    registerWithStartupBarrier(barrier, {
++      setPtyController: vi.fn((next) => {
++        controller = next
++      }),
++      registerPty: vi.fn(),
++      onPtySpawned: vi.fn(),
++      onPtyExit: vi.fn(),
++      onPtyData: vi.fn()
++    })
++    if (!controller) {
++      throw new Error('runtime controller was not installed')
++    }
++    return controller
++  }
++
++  it('pty:hasPty defers a restored daemon id until the provider swap lands instead of answering a pre-swap false', async () => {
++    const barrier = makeDeferred()
++    registerWithStartupBarrier(barrier.promise)
++
++    const pending = Promise.resolve(
++      handlers.get('pty:hasPty')!(null, { id: 'daemon-restored-pty' })
++    ) as Promise<boolean | null>
++    let settled = false
++    void pending.then(() => {
++      settled = true
++    })
++
++    await Promise.resolve()
++    await Promise.resolve()
++    // Pre-fix this has already resolved false — the pre-swap LocalPtyProvider
++    // answered for a PTY it does not own, and the renderer reconciler treats
++    // exactly that false as authority to tear the pane down.
++    expect(settled).toBe(false)
++
++    installDaemonTestProvider({ hasPty: (id: string) => id === 'daemon-restored-pty' })
++    barrier.resolve()
++
++    await expect(pending).resolves.toBe(true)
++  })
++
++  it('pty:hasPty answers SSH-owned ids from their provider without waiting on the local swap', async () => {
++    const barrier = makeDeferred()
++    const sshHasPty = vi.fn((id: string) => id === 'ssh:ssh-1@@pty-2')
++    registerSshPtyProvider('ssh-1', { hasPty: sshHasPty } as never)
++    registerWithStartupBarrier(barrier.promise)
++
++    await expect(handlers.get('pty:hasPty')!(null, { id: 'ssh:ssh-1@@pty-2' })).resolves.toBe(true)
++    expect(sshHasPty).toHaveBeenCalledWith('ssh:ssh-1@@pty-2')
++  })
++
++  it('runtime controller hasPty answers null, not false, while the local provider swap is in flight', async () => {
++    const barrier = makeDeferred()
++    const controller = installRuntimeControllerWithBarrier(barrier.promise)
++
++    // Pre-fix: the pre-swap LocalPtyProvider's ptyProcesses.has() answers a
++    // confident false for a daemon-owned id. terminal.list then records an
++    // observed absence (verdict forgotten) instead of unverifiable.
++    expect(controller.hasPty('daemon-restored-pty')).toBe(null)
++
++    installDaemonTestProvider({ hasPty: (id: string) => id === 'daemon-restored-pty' })
++    barrier.resolve()
++
++    await vi.waitFor(() => {
++      expect(controller.hasPty('daemon-restored-pty')).toBe(true)
++    })
++  })
++
++  it('keeps all 28 retained daemon PTYs unverifiable until the owning provider lands', async () => {
++    const barrier = makeDeferred()
++    const controller = installRuntimeControllerWithBarrier(barrier.promise)
++    const retainedIds = Array.from({ length: 28 }, (_, index) => `daemon-retained-${index + 1}`)
++
++    for (const retainedId of retainedIds) {
++      expect(controller.hasPty(retainedId)).toBe(null)
++    }
++
++    const retainedSet = new Set(retainedIds)
++    installDaemonTestProvider({ hasPty: (id: string) => retainedSet.has(id) })
++    barrier.resolve()
++
++    await vi.waitFor(() => {
++      for (const retainedId of retainedIds) {
++        expect(controller.hasPty(retainedId)).toBe(true)
++      }
++    })
++  })
++
++  it('runtime controller hasPty never answers a paired-runtime handle from the local registry', () => {
++    // No startup barrier: the remote-handle guard must hold on its own, not
++    // ride on the swap-window gate. Same routing hazard the async probe and
++    // pty:hasPty already guard — no locally routed provider can
++    // authoritatively answer for a remote host's PTY, so remote-scoped ids
++    // stay unknown, never absent.
++    let controller: { hasPty: (ptyId: string) => boolean | null } | undefined
++    registerPtyHandlers(
++      mainWindow as never,
++      {
++        setPtyController: vi.fn((next) => {
++          controller = next
++        }),
++        registerPty: vi.fn(),
++        onPtySpawned: vi.fn(),
++        onPtyExit: vi.fn(),
++        onPtyData: vi.fn()
++      } as never
++    )
++
++    expect(controller?.hasPty('remote:environment@@pty-1')).toBe(null)
++  })
++
++  it('runtime controller hasPty answers SSH-owned ids without waiting on the local swap', () => {
++    const barrier = makeDeferred()
++    const sshHasPty = vi.fn((id: string) => id === 'ssh-live-pty')
++    registerSshPtyProvider('ssh-1', { hasPty: sshHasPty } as never)
++    ptyOwnership.set('ssh-live-pty', 'ssh-1')
++    try {
++      const controller = installRuntimeControllerWithBarrier(barrier.promise)
++
++      expect(controller.hasPty('ssh-live-pty')).toBe(true)
++      expect(sshHasPty).toHaveBeenCalledWith('ssh-live-pty')
++    } finally {
++      ptyOwnership.delete('ssh-live-pty')
++    }
++  })
++
++  it('pty:inspectProcess defers a restored daemon id until the provider swap lands instead of answering from the non-owning provider', async () => {
++    const barrier = makeDeferred()
++    registerWithStartupBarrier(barrier.promise)
++
++    const pending = Promise.resolve(
++      handlers.get('pty:inspectProcess')!(null, { id: 'daemon-restored-pty' })
++    )
++    let settled = false
++    void pending.then(() => {
++      settled = true
++    })
++
++    await Promise.resolve()
++    await Promise.resolve()
++    await Promise.resolve()
++    // Pre-fix this has already resolved — the pre-swap LocalPtyProvider was
++    // consulted about a PTY it does not own. Its non-ownership happens to read
++    // as unavailable today only because the inspection funnel consults hasPty
++    // before the provider's own inspection; completion-sensitive evidence must
++    // come from the post-swap owner, not from that internal ordering.
++    expect(settled).toBe(false)
++
++    installDaemonTestProvider({
++      hasPty: (id: string) => id === 'daemon-restored-pty',
++      inspectProcess: vi.fn(async () => ({
++        foregroundProcess: 'codex',
++        hasChildProcesses: true
++      }))
++    })
++    barrier.resolve()
++
++    await expect(pending).resolves.toEqual({
++      foregroundProcess: 'codex',
++      hasChildProcesses: true
++    })
++  })
++
++  it('pty:inspectProcess answers SSH-owned ids from their provider without waiting on the local swap', async () => {
++    const barrier = makeDeferred()
++    const sshInspect = vi.fn(async () => ({
++      foregroundProcess: 'ssh-codex',
++      hasChildProcesses: true
++    }))
++    registerSshPtyProvider('ssh-1', {
++      hasPty: (id: string) => id === 'ssh:ssh-1@@pty-2',
++      inspectProcess: sshInspect
++    } as never)
++    registerWithStartupBarrier(barrier.promise)
++
++    await expect(
++      handlers.get('pty:inspectProcess')!(null, { id: 'ssh:ssh-1@@pty-2' })
++    ).resolves.toEqual({ foregroundProcess: 'ssh-codex', hasChildProcesses: true })
++    expect(sshInspect).toHaveBeenCalledWith('ssh:ssh-1@@pty-2')
++  })
++
++  it('keeps the in-process provider authoritative when no startup barrier is configured', async () => {
++    // Headless/orcad installs the daemon before registerPtyHandlers and passes
++    // no barrier; the installed provider is then the sole owner (#12393) and
++    // its false stays an observed absence.
++    let controller: { hasPty: (ptyId: string) => boolean | null } | undefined
++    registerPtyHandlers(
++      mainWindow as never,
++      {
++        setPtyController: vi.fn((next) => {
++          controller = next
++        }),
++        registerPty: vi.fn(),
++        onPtySpawned: vi.fn(),
++        onPtyExit: vi.fn(),
++        onPtyData: vi.fn()
++      } as never
++    )
++
++    expect(controller?.hasPty('never-spawned-pty')).toBe(false)
++    await expect(handlers.get('pty:hasPty')!(null, { id: 'never-spawned-pty' })).resolves.toBe(
++      false
++    )
++    // The sole owner's inspection answer stays immediate too: with no swap in
++    // flight there is no window in which its word could be fabricated.
++    await expect(
++      handlers.get('pty:inspectProcess')!(null, { id: 'never-spawned-pty' })
++    ).resolves.toEqual({ foregroundProcess: null, hasChildProcesses: false, unavailable: true })
++  })
++})
+diff --git a/src/main/ipc/pty/ipc/inspect.ts b/src/main/ipc/pty/ipc/inspect.ts
+index 96c84b45c744441d1d1f77332dc0c95a42cdd128..9f99d1e099c9a22e116b144b168152070b8726e1 100644
+--- a/src/main/ipc/pty/ipc/inspect.ts
++++ b/src/main/ipc/pty/ipc/inspect.ts
+@@ -31,0 +32,10 @@ export function installPtyInspectIpcHandlers(deps: {
++  // Why: wait for daemon startup before selecting the local provider for an id
++  // the swap may re-own (#7742); ids owned by an SSH connection never wait.
++  // renderer-kill.ts inlines this — pty:kill's listener teardown is
++  // ordering-sensitive and must not gain even a no-barrier microtask.
++  const awaitSwapWindow = async (id: string): Promise<void> => {
++    await getLocalPtyProviderStartupPromise(
++      ptyOwnership.get(id) ?? parseAppSshPtyId(id)?.connectionId
++    )
++  }
++
+@@ -119,0 +130,4 @@ export function installPtyInspectIpcHandlers(deps: {
++    // Why: the pre-swap LocalPtyProvider does not own restored daemon ids, and
++    // its "no PTY" is exactly the false the renderer reconciler is allowed to
++    // close panes on.
++    await awaitSwapWindow(args.id)
+@@ -158,6 +172,8 @@ export function installPtyInspectIpcHandlers(deps: {
+-    if (
+-      typeof args?.id !== 'string' ||
+-      !args.id ||
+-      args.id.startsWith('remote:') ||
+-      !hasPtyProviderForInspection(args.id)
+-    ) {
++    if (typeof args?.id !== 'string' || !args.id || args.id.startsWith('remote:')) {
++      return { foregroundProcess: null, hasChildProcesses: false, unavailable: true as const }
++    }
++    // Why: the pre-swap LocalPtyProvider does not own restored daemon ids, so
++    // nothing it reports about one is an observation; the post-swap owner must
++    // answer completion-sensitive inspection.
++    await awaitSwapWindow(args.id)
++    if (!hasPtyProviderForInspection(args.id)) {
 diff --git a/src/main/ipc/pty/register-headless-runtime.test.ts b/src/main/ipc/pty/register-headless-runtime.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..7063ec2454d1d07dfbae8ac3d2fa72716d7dab62
@@ -399,6 +728,48 @@ index f380482a079f25fc83bb581955d0c9f3e47ce4c3..2212fbfac3a3bdd5418c1a9d2c78a4cb
 +): Promise<void> {
 @@ -46,0 +48 @@ export function registerHeadlessPtyRuntime(
 +  return store ? hydrateLocalPtyRegistryAtBoot(store) : Promise.resolve()
+diff --git a/src/main/ipc/pty/runtime/controller.ts b/src/main/ipc/pty/runtime/controller.ts
+index ff5a0e5ccd0a774b0c7a123679bf95d4e09d6fa3..19adaec77de2a1b61ef93cd4ade91da8349a17fc 100644
+--- a/src/main/ipc/pty/runtime/controller.ts
++++ b/src/main/ipc/pty/runtime/controller.ts
+@@ -63 +63 @@ export function installPtyRuntimeController(deps: PtyRuntimeControllerDeps): voi
+-    hasPty: (ptyId) => hasPtyFromRuntimeController(ptyId),
++    hasPty: (ptyId) => hasPtyFromRuntimeController(deps, ptyId),
+diff --git a/src/main/ipc/pty/runtime/operations.ts b/src/main/ipc/pty/runtime/operations.ts
+index bf3ca74af25aca8b3e0975b7ee71485813edb87f..bb8032f9cfb656c386ee5a4df8ff51056f7a4bd4 100644
+--- a/src/main/ipc/pty/runtime/operations.ts
++++ b/src/main/ipc/pty/runtime/operations.ts
+@@ -155 +155,7 @@ export async function clearBufferFromRuntimeController(
+-export function hasPtyFromRuntimeController(ptyId: string): boolean | null {
++const settledLocalPtyProviderStartups = new WeakSet<Promise<void>>()
++const watchedLocalPtyProviderStartups = new WeakSet<Promise<void>>()
++
++export function hasPtyFromRuntimeController(
++  deps: PtyRuntimeControllerDeps,
++  ptyId: string
++): boolean | null {
+@@ -156,0 +163,21 @@ export function hasPtyFromRuntimeController(ptyId: string): boolean | null {
++    // Why: no locally routed provider can authoritatively answer for a
++    // remote host's PTY, so remote-scoped ids stay unknown, never absent.
++    if (ptyId.startsWith('remote:')) {
++      return null
++    }
++    const connectionId = ptyOwnership.get(ptyId) ?? parseAppSshPtyId(ptyId)?.connectionId
++    const startupPromise = deps.getLocalPtyProviderStartupPromise(connectionId)
++    if (startupPromise && !settledLocalPtyProviderStartups.has(startupPromise)) {
++      // Why: a sync probe cannot wait out the cold-start daemon swap the way
++      // probePtyLiveness does, and the pre-swap provider's "no PTY" for a
++      // daemon-restored id is fabricated — answer unverifiable until the swap
++      // settles (docs/reference/ssh-execution-boundary.md rule 2).
++      if (!watchedLocalPtyProviderStartups.has(startupPromise)) {
++        watchedLocalPtyProviderStartups.add(startupPromise)
++        const markSettled = (): void => {
++          settledLocalPtyProviderStartups.add(startupPromise)
++        }
++        startupPromise.then(markSettled, markSettled)
++      }
++      return null
++    }
 diff --git a/src/main/memory/hydrate-local-pty-registry.test.ts b/src/main/memory/hydrate-local-pty-registry.test.ts
 index 7b9a90bfb7314cc6f7ed4fe2162b996af6a3a3b5..84c581c04e33682b52bb622b6bcf7ff053b57bc2 100644
 --- a/src/main/memory/hydrate-local-pty-registry.test.ts
