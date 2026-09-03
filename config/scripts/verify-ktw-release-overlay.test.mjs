@@ -24,8 +24,8 @@ const OVERLAYS = [
     patchPath:
       'config/ktw-release-overlays/v1.4.196/0001-KTW-one-shot與completion相容層.patch',
     officialBaseSha: 'aad4ae42ea5e555f25fdec679ebbcd18cc1e8911',
-    pathCount: 17,
-    outputTreeSha: 'ba255d46d4dfe87072cfad27d774868fdb468c10'
+    pathCount: 30,
+    outputTreeSha: '672c8fcae1781af554e67da1c034d14b7ddf3112'
   }
 ].map((overlay) => ({
   ...overlay,

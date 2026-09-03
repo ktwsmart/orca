@@ -394,6 +394,78 @@ index 0dc6750e8de167a50c4152a884f13d41908603cb..5c6eac0aff866f1c8e8c54687030f04d
 +      return completionAuthority === 'process-exit'
 +        ? await observeProcessExit(runtime, handle, signal)
 +        : await observeAgentStatusCompletion(runtime, handle, signal)
+diff --git a/src/main/ipc/pty-runtime-kill-and-exit.test.ts b/src/main/ipc/pty-runtime-kill-and-exit.test.ts
+index 2200b2b6043d5b1102819d83de7c167b3f79ddaf..3b29419acea1630d4502a88abd02f28eab260a82 100644
+--- a/src/main/ipc/pty-runtime-kill-and-exit.test.ts
++++ b/src/main/ipc/pty-runtime-kill-and-exit.test.ts
+@@ -248,2 +248,4 @@ describe('registerPtyHandlers', () => {
+-  it('does not synthesize a duplicate renderer exit when kill emits provider exit', async () => {
+-    const exitListeners = new Set<(payload: { id: string; code: number }) => void>()
++  it('does not synthesize a duplicate renderer exit and forwards its verified cause', async () => {
++    const exitListeners = new Set<
++      (payload: { id: string; code: number; cause?: { kind: 'operator_close' } }) => void
++    >()
+@@ -252 +254 @@ describe('registerPtyHandlers', () => {
+-        listener({ id, code: 0 })
++        listener({ id, code: 0, cause: { kind: 'operator_close' } })
+@@ -275,4 +277,12 @@ describe('registerPtyHandlers', () => {
+-      onExit: vi.fn((listener: (payload: { id: string; code: number }) => void) => {
+-        exitListeners.add(listener)
+-        return () => exitListeners.delete(listener)
+-      }),
++      onExit: vi.fn(
++        (
++          listener: (payload: {
++            id: string
++            code: number
++            cause?: { kind: 'operator_close' }
++          }) => void
++        ) => {
++          exitListeners.add(listener)
++          return () => exitListeners.delete(listener)
++        }
++      ),
+@@ -291 +301,2 @@ describe('registerPtyHandlers', () => {
+-      providerExitObserved: true
++      providerExitObserved: true,
++      cause: { kind: 'operator_close' }
+@@ -294 +305 @@ describe('registerPtyHandlers', () => {
+-      [['pty:exit', { id: 'local-pty', code: 0 }]]
++      [['pty:exit', { id: 'local-pty', code: 0, exitCause: { kind: 'operator_close' } }]]
+diff --git a/src/main/ipc/pty/delivery/exit.ts b/src/main/ipc/pty/delivery/exit.ts
+index 3825be5119272836b43b8ec2d1f95bc428aa458f..0209b5ed9a6f7f3b342409d96be40376fb4b8511 100644
+--- a/src/main/ipc/pty/delivery/exit.ts
++++ b/src/main/ipc/pty/delivery/exit.ts
+@@ -10,0 +11,8 @@ import type { PtyIpcSession } from '../session'
++import type { TerminalExitCause } from '../../../../shared/terminal-exit-cause'
++
++type RendererPtyExitPayload = {
++  id: string
++  code: number
++  incarnationId?: string
++  exitCause?: TerminalExitCause
++}
+@@ -49 +57 @@ export function preparePtyExitForRenderer(
+-  payload: { id: string; code: number; incarnationId?: string }
++  payload: RendererPtyExitPayload
+@@ -115 +123 @@ export function finalizePtyExitForRenderer(
+-  payload: { id: string; code: number; incarnationId?: string }
++  payload: RendererPtyExitPayload
+@@ -158 +166 @@ export function sendPtyExitToRenderer(
+-  payload: { id: string; code: number; incarnationId?: string }
++  payload: RendererPtyExitPayload
+diff --git a/src/main/ipc/pty/provider/bind-listeners.ts b/src/main/ipc/pty/provider/bind-listeners.ts
+index 8febd1e3534fcf38a7c0af396fe0aa18b234614d..d3a98afedf607a29c621266bb532cdedf29d9149 100644
+--- a/src/main/ipc/pty/provider/bind-listeners.ts
++++ b/src/main/ipc/pty/provider/bind-listeners.ts
+@@ -102,2 +101,0 @@ export function bindProviderListeners(session: PtyIpcSession): void {
+-      // Why not the whole payload: the exit cause is a main-process fact for the
+-      // runtime's records; the renderer's pty:exit contract stays as it was.
+@@ -106,0 +105,4 @@ export function bindProviderListeners(session: PtyIpcSession): void {
++        // Why: local providers derive this from node-pty's signal + trusted
++        // child-status boundary. Remote/legacy providers omit it and renderer
++        // one-shot completion fails closed instead of guessing from code 0.
++        ...(payload.cause ? { exitCause: payload.cause } : {}),
 diff --git a/src/main/persistence-automations.test.ts b/src/main/persistence-automations.test.ts
 index 9db16b7e681569ba76628a98afc0f4c12ad3f5d1..e0348510e039d40b5bc449d76a4252ec0af6e10d 100644
 --- a/src/main/persistence-automations.test.ts
@@ -416,39 +488,294 @@ index 639fda7b836b79bb7be9378085fe2e922eb70df7..9edfb77f5f15682dcfedbfdd263e8fec
 +    completionAuthority: Object.hasOwn(result, 'completionAuthority')
 +      ? result.completionAuthority
 +      : current.completionAuthority,
+diff --git a/src/main/providers/local-pty-provider-shutdown.test.ts b/src/main/providers/local-pty-provider-shutdown.test.ts
+index cb7595800c1041772ee826a4716f0fe19275fd6e..200882e6b807f8056919c3438f9a14e32c0f97e4 100644
+--- a/src/main/providers/local-pty-provider-shutdown.test.ts
++++ b/src/main/providers/local-pty-provider-shutdown.test.ts
+@@ -182,4 +182 @@ describe('LocalPtyProvider', () => {
+-      expect(onExit).toHaveBeenCalledWith(id, -1, incarnationId, {
+-        kind: 'unknown',
+-        reason: 'stop_unverified'
+-      })
++      expect(onExit).toHaveBeenCalledWith(id, -1, incarnationId, { kind: 'operator_close' })
+diff --git a/src/main/providers/local-pty-session-activation.ts b/src/main/providers/local-pty-session-activation.ts
+index a5991581f82f941d6651fb07d9ad81b7b3855443..74d683e34dc61dfada6263cc5d290589fb24022b 100644
+--- a/src/main/providers/local-pty-session-activation.ts
++++ b/src/main/providers/local-pty-session-activation.ts
+@@ -5 +5,4 @@ import { resolvePtyOwnerBackend } from '../../shared/pty-owner-backend'
+-import { resolveProcessExitCause } from '../../shared/terminal-exit-cause'
++import {
++  OPERATOR_CLOSE_EXIT_CAUSE,
++  resolveProcessExitCause
++} from '../../shared/terminal-exit-cause'
+@@ -148 +151,5 @@ export function activateLocalPtySession(args: {
+-    getOptions().onExit?.(id, exitCode, incarnationId, cause)
++    // Why: node-pty can report a graceful operator stop as exitCode 0. Preserve
++    // the already-captured termination intent so renderer one-shot completion
++    // cannot mistake a user close for a successful autonomous exit.
++    const reportedCause = wasTerminationRequested ? OPERATOR_CLOSE_EXIT_CAUSE : cause
++    getOptions().onExit?.(id, exitCode, incarnationId, reportedCause)
+@@ -150 +157 @@ export function activateLocalPtySession(args: {
+-      cb({ id, code: exitCode, incarnationId, cause })
++      cb({ id, code: exitCode, incarnationId, cause: reportedCause })
+diff --git a/src/preload/api/pty-api.ts b/src/preload/api/pty-api.ts
+index 7eee16ea52268d110f22aef1f3e6c97bd572d91e..2b9cd04c9d52ff9965407856f13870df38b33486 100644
+--- a/src/preload/api/pty-api.ts
++++ b/src/preload/api/pty-api.ts
+@@ -15,0 +16 @@ import type { TerminalSideEffectBatch } from '../../shared/terminal-side-effect-
++import type { TerminalExitCause } from '../../shared/terminal-exit-cause'
+@@ -204,0 +206,2 @@ export type PtyApi = {
++      /** Main-process verified reason; absent for legacy/remote hosts. */
++      exitCause?: TerminalExitCause
+diff --git a/src/preload/api/pty-bridge-part-2.ts b/src/preload/api/pty-bridge-part-2.ts
+index 1686a621f97b1bbe4e68b5bc0e8a5ef38c78553b..aefbf3d03846b11f1e8cfb50036039d27beea6bb 100644
+--- a/src/preload/api/pty-bridge-part-2.ts
++++ b/src/preload/api/pty-bridge-part-2.ts
+@@ -3,0 +4 @@ import type { TerminalSideEffectBatch } from '../../shared/terminal-side-effect-
++import type { TerminalExitCause } from '../../shared/terminal-exit-cause'
+@@ -68,0 +70,2 @@ export const ptyApiPart2 = {
++      /** Main-process verified reason the process ended; absent for legacy/remote hosts. */
++      exitCause?: TerminalExitCause
+@@ -78,0 +82 @@ export const ptyApiPart2 = {
++        exitCause?: TerminalExitCause
+diff --git a/src/renderer/src/components/terminal-pane/pty-dispatcher.ts b/src/renderer/src/components/terminal-pane/pty-dispatcher.ts
+index ccb38ae2f550678b8b30a5962eafea790ae07b56..1f815b9c0315590f9a9524a06fb480abf3f28482 100644
+--- a/src/renderer/src/components/terminal-pane/pty-dispatcher.ts
++++ b/src/renderer/src/components/terminal-pane/pty-dispatcher.ts
+@@ -16 +16 @@ import {
+-import { deliverPtyExitToHandlers } from './pty-exit-delivery'
++import { deliverPtyExitToHandlers, type PtyExitContext } from './pty-exit-delivery'
+@@ -63,4 +63 @@ export type PtyDataMeta = {
+-const ptyExitSidecars = new Map<
+-  string,
+-  Set<(code: number, context: { hadPrimary: boolean }) => void>
+->()
++const ptyExitSidecars = new Map<string, Set<(code: number, context: PtyExitContext) => void>>()
+@@ -208,0 +206 @@ function attachPtySecondaryPushListeners(unsubscribes: (() => void)[]): void {
++        ...(payload.exitCause ? { exitCause: payload.exitCause } : {}),
+@@ -230 +228 @@ export function subscribeToPtyExit(
+-  watcher: (code: number, context: { hadPrimary: boolean }) => void
++  watcher: (code: number, context: PtyExitContext) => void
+@@ -269 +267 @@ export function registerEagerPtyBuffer(
+-  onExit: (ptyId: string, code: number) => void,
++  onExit: (ptyId: string, code: number, context?: PtyExitContext) => void,
+@@ -295 +293 @@ export function registerEagerPtyBuffer(
+-  const exitHandler = (code: number): void => {
++  const exitHandler = (code: number, context?: PtyExitContext): void => {
+@@ -303 +301,5 @@ export function registerEagerPtyBuffer(
+-    onExit(ptyId, code)
++    if (context) {
++      onExit(ptyId, code, context)
++    } else {
++      onExit(ptyId, code)
++    }
+diff --git a/src/renderer/src/components/terminal-pane/pty-exit-delivery.ts b/src/renderer/src/components/terminal-pane/pty-exit-delivery.ts
+index a01e09c2d8fb4a63fc0213a3fac218897ce8aa2e..6568aa52d09d08156e4d6dafff7894dd6b0018f6 100644
+--- a/src/renderer/src/components/terminal-pane/pty-exit-delivery.ts
++++ b/src/renderer/src/components/terminal-pane/pty-exit-delivery.ts
+@@ -5,0 +6,7 @@ import {
++import type { TerminalExitCause } from '../../../../shared/terminal-exit-cause'
++
++export type PtyExitContext = {
++  hadPrimary: boolean
++  /** Main-process verified reason; absent means unknown and must not be guessed. */
++  exitCause?: TerminalExitCause
++}
+@@ -12,2 +19,3 @@ type PtyExitDelivery = {
+-  primary?: (code: number) => void
+-  sidecars: readonly ((code: number, context: { hadPrimary: boolean }) => void)[]
++  exitCause?: TerminalExitCause
++  primary?: (code: number, context?: PtyExitContext) => void
++  sidecars: readonly ((code: number, context: PtyExitContext) => void)[]
+@@ -24 +32,5 @@ export function deliverPtyExitToHandlers(delivery: PtyExitDelivery): void {
+-        delivery.primary(delivery.code)
++        if (delivery.exitCause) {
++          delivery.primary(delivery.code, { hadPrimary: true, exitCause: delivery.exitCause })
++        } else {
++          delivery.primary(delivery.code)
++        }
+@@ -31 +43,6 @@ export function deliverPtyExitToHandlers(delivery: PtyExitDelivery): void {
+-      bufferPreHandlerPtyExit(delivery.ptyId, delivery.code, delivery.incarnationId)
++      bufferPreHandlerPtyExit(
++        delivery.ptyId,
++        delivery.code,
++        delivery.incarnationId,
++        delivery.exitCause
++      )
+@@ -40 +57,4 @@ export function deliverPtyExitToHandlers(delivery: PtyExitDelivery): void {
+-      sidecar(delivery.code, { hadPrimary: delivery.primary !== undefined })
++      sidecar(delivery.code, {
++        hadPrimary: delivery.primary !== undefined,
++        ...(delivery.exitCause ? { exitCause: delivery.exitCause } : {})
++      })
+diff --git a/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.test.ts b/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.test.ts
+index a8f4a706a892087f9b821cb5bb19fde4861175b5..660deb23e2b72948022788f784edbbe6ad5274c0 100644
+--- a/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.test.ts
++++ b/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.test.ts
+@@ -145,0 +146,12 @@ describe('pre-handler PTY buffer', () => {
++  it('preserves a verified exit cause while an exit waits for its primary handler', () => {
++    const onExit = vi.fn()
++    bufferPreHandlerPtyExit(EXIT_PTY_ID, 0, FRESH_INCARNATION_ID, { kind: 'operator_close' })
++
++    drainPreHandlerPtyExit(EXIT_PTY_ID, onExit, FRESH_INCARNATION_ID)
++
++    expect(onExit).toHaveBeenCalledWith(0, {
++      hadPrimary: false,
++      exitCause: { kind: 'operator_close' }
++    })
++  })
++
+diff --git a/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.ts b/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.ts
+index bbe4b783ee9db93766d946d9f5f61bdde96c0869..c2d705d5bbd471b680bab907adec78b31c632b17 100644
+--- a/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.ts
++++ b/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.ts
+@@ -3,0 +4,2 @@ import type { PtyDataMeta } from './pty-dispatcher'
++import type { TerminalExitCause } from '../../../../shared/terminal-exit-cause'
++import type { PtyExitContext } from './pty-exit-delivery'
+@@ -23,0 +26 @@ type BufferedPreHandlerPtyExit = {
++  exitCause?: TerminalExitCause
+@@ -199 +202,2 @@ export function bufferPreHandlerPtyExit(
+-  incarnationId?: unknown
++  incarnationId?: unknown,
++  exitCause?: TerminalExitCause
+@@ -209 +213,2 @@ export function bufferPreHandlerPtyExit(
+-    ...(isPtyIncarnationId(incarnationId) ? { incarnationId } : {})
++    ...(isPtyIncarnationId(incarnationId) ? { incarnationId } : {}),
++    ...(exitCause ? { exitCause } : {})
+@@ -329 +334 @@ export function drainPreHandlerPtyExit(
+-  handler: (code: number) => void,
++  handler: (code: number, context?: PtyExitContext) => void,
+@@ -345 +350,5 @@ export function drainPreHandlerPtyExit(
+-    handler(exit.code)
++    if (exit.exitCause) {
++      handler(exit.code, { hadPrimary: false, exitCause: exit.exitCause })
++    } else {
++      handler(exit.code)
++    }
+diff --git a/src/renderer/src/components/terminal-pane/pty-shutdown-data-suspension.ts b/src/renderer/src/components/terminal-pane/pty-shutdown-data-suspension.ts
+index 508ea88b2becde340ba59d8c1e2a3174c06b8e37..d212f4912b260b61a56076ae188b6c1b33642666 100644
+--- a/src/renderer/src/components/terminal-pane/pty-shutdown-data-suspension.ts
++++ b/src/renderer/src/components/terminal-pane/pty-shutdown-data-suspension.ts
+@@ -3,0 +4 @@ import { PtyShutdownOutputQueue, type PtyShutdownOutputEvent } from './pty-shutd
++import type { PtyExitContext } from './pty-exit-delivery'
+@@ -8 +9 @@ export const ptyReplayHandlers = new Map<string, (data: string) => void>()
+-export const ptyExitHandlers = new Map<string, (code: number) => void>()
++export const ptyExitHandlers = new Map<string, (code: number, context?: PtyExitContext) => void>()
+diff --git a/src/renderer/src/components/terminal-pane/pty-transport-eager-buffer-replay.test.ts b/src/renderer/src/components/terminal-pane/pty-transport-eager-buffer-replay.test.ts
+index 436e0dde0ecc25d5626ab860f811a7aa1061406e..6fb1cd2fdda5eddd0966d37e642835bbe16da112 100644
+--- a/src/renderer/src/components/terminal-pane/pty-transport-eager-buffer-replay.test.ts
++++ b/src/renderer/src/components/terminal-pane/pty-transport-eager-buffer-replay.test.ts
+@@ -12 +12,6 @@ describe('createIpcPtyTransport', () => {
+-    | ((payload: { id: string; code: number; preserveRendererBinding?: boolean }) => void)
++    | ((payload: {
++        id: string
++        code: number
++        preserveRendererBinding?: boolean
++        exitCause?: { kind: 'signaled'; signal: number }
++      }) => void)
+@@ -151,0 +157,23 @@ describe('createIpcPtyTransport', () => {
++  it('delivers the verified exit cause to eager owners and sidecars', async () => {
++    const { registerEagerPtyBuffer, subscribeToPtyExit } = await import('./pty-transport')
++    const onEagerExit = vi.fn()
++    const onSidecarExit = vi.fn()
++    registerEagerPtyBuffer('pty-cause', onEagerExit)
++    subscribeToPtyExit('pty-cause', onSidecarExit)
++
++    onExit?.({
++      id: 'pty-cause',
++      code: 0,
++      exitCause: { kind: 'signaled', signal: 9 }
++    })
++
++    expect(onEagerExit).toHaveBeenCalledWith('pty-cause', 0, {
++      hadPrimary: true,
++      exitCause: { kind: 'signaled', signal: 9 }
++    })
++    expect(onSidecarExit).toHaveBeenCalledWith(0, {
++      hadPrimary: true,
++      exitCause: { kind: 'signaled', signal: 9 }
++    })
++  })
++
 diff --git a/src/renderer/src/hooks/automation-dispatch-completion.ts b/src/renderer/src/hooks/automation-dispatch-completion.ts
-index 098d1167a380c37936c0f64d031d51d3f542dc3d..2177488d8f3c330250a9c97ad011c331cfbbb703 100644
+index 098d1167a380c37936c0f64d031d51d3f542dc3d..a8b54b49729048ce16ec8fa331f6a40d50cee559 100644
 --- a/src/renderer/src/hooks/automation-dispatch-completion.ts
 +++ b/src/renderer/src/hooks/automation-dispatch-completion.ts
 @@ -9 +9,2 @@ import type {
 -  AutomationRun
 +  AutomationRun,
 +  AutomationRunCompletionAuthority
-@@ -34,0 +36,4 @@ export function createAutomationDispatchCompletion(args: {
+@@ -16,0 +18,4 @@ import type { Worktree } from '../../../shared/worktree/types'
++import {
++  describeTerminalExitCause,
++  type TerminalExitCause
++} from '../../../shared/terminal-exit-cause'
+@@ -33 +38 @@ export function createAutomationDispatchCompletion(args: {
+-  let pendingExitCode: number | null = null
++  let pendingExit: { code: number; exitCause?: TerminalExitCause } | null = null
+@@ -34,0 +40,4 @@ export function createAutomationDispatchCompletion(args: {
 +  // Fresh one-shot authority is selected by the launch plan. Until that plan
 +  // returns, a synchronous SessionEnd/done callback is only pending evidence;
 +  // it must not win the race against process-exit authority.
 +  let completionAuthority: AutomationRunCompletionAuthority | null = null
-@@ -127 +132,4 @@ export function createAutomationDispatchCompletion(args: {
+@@ -88 +97 @@ export function createAutomationDispatchCompletion(args: {
+-  const markExitResult = async (code: number): Promise<void> => {
++  const markExitResult = async (code: number, exitCause?: TerminalExitCause): Promise<void> => {
+@@ -93,0 +103,11 @@ export function createAutomationDispatchCompletion(args: {
++    const processExitSucceeded =
++      completionAuthority === 'process-exit'
++        ? exitCause?.kind === 'exited' && exitCause.exitCode === 0
++        : code === 0
++    const error = processExitSucceeded
++      ? null
++      : completionAuthority === 'process-exit'
++        ? exitCause
++          ? `Automation one-shot process ended: ${describeTerminalExitCause(exitCause)}.`
++          : `Automation one-shot process ended without a verified exit cause (reported code ${code}).`
++        : `Automation process exited with code ${code}.`
+@@ -97 +117 @@ export function createAutomationDispatchCompletion(args: {
+-        status: code === 0 ? 'completed' : 'dispatch_failed',
++        status: processExitSucceeded ? 'completed' : 'dispatch_failed',
+@@ -102 +122 @@ export function createAutomationDispatchCompletion(args: {
+-        error: code === 0 ? null : `Automation process exited with code ${code}.`
++        error
+@@ -108 +128 @@ export function createAutomationDispatchCompletion(args: {
+-    if (code === 0) {
++    if (processExitSucceeded) {
+@@ -127 +147,4 @@ export function createAutomationDispatchCompletion(args: {
 -    if (!dispatchMarked) {
 +    if (completionAuthority === 'process-exit') {
 +      return
 +    }
 +    if (!dispatchMarked || completionAuthority === null) {
-@@ -219,0 +228,6 @@ export function createAutomationDispatchCompletion(args: {
+@@ -133 +156 @@ export function createAutomationDispatchCompletion(args: {
+-  const handleExit = (code: number): void => {
++  const handleExit = (code: number, exitCause?: TerminalExitCause): void => {
+@@ -138 +161 @@ export function createAutomationDispatchCompletion(args: {
+-      pendingExitCode = code
++      pendingExit = { code, ...(exitCause ? { exitCause } : {}) }
+@@ -141 +164 @@ export function createAutomationDispatchCompletion(args: {
+-    settleLateResult(markExitResult(code))
++    settleLateResult(markExitResult(code, exitCause))
+@@ -219,0 +243,6 @@ export function createAutomationDispatchCompletion(args: {
 +    setCompletionAuthority: (authority: AutomationRunCompletionAuthority) => {
 +      completionAuthority = authority
 +      if (authority === 'process-exit') {
 +        pendingDone = false
 +      }
 +    },
-@@ -228 +242,3 @@ export function createAutomationDispatchCompletion(args: {
+@@ -228 +257,3 @@ export function createAutomationDispatchCompletion(args: {
 -      if (pendingDone) {
-+      if (pendingExitCode !== null && completionAuthority === 'process-exit') {
-+        await markExitResult(pendingExitCode)
++      if (pendingExit !== null && completionAuthority === 'process-exit') {
++        await markExitResult(pendingExit.code, pendingExit.exitCause)
 +      } else if (pendingDone && completionAuthority !== 'process-exit') {
+@@ -230,2 +261,2 @@ export function createAutomationDispatchCompletion(args: {
+-      } else if (pendingExitCode !== null) {
+-        await markExitResult(pendingExitCode)
++      } else if (pendingExit !== null) {
++        await markExitResult(pendingExit.code, pendingExit.exitCause)
 diff --git a/src/renderer/src/hooks/automation-dispatch-handler.ts b/src/renderer/src/hooks/automation-dispatch-handler.ts
-index 6df1a64fb58c26d43644756b9e2f5b4727313de7..3e8ded60f2e5e286485c16787aa01a37e5935bc0 100644
+index 6df1a64fb58c26d43644756b9e2f5b4727313de7..d0eb7da0baeb1d4d75434b80d0acc974d55f6d54 100644
 --- a/src/renderer/src/hooks/automation-dispatch-handler.ts
 +++ b/src/renderer/src/hooks/automation-dispatch-handler.ts
 @@ -95,0 +96 @@ export async function handleAutomationDispatchRequest({
@@ -457,13 +784,18 @@ index 6df1a64fb58c26d43644756b9e2f5b4727313de7..3e8ded60f2e5e286485c16787aa01a37
 +                completionAuthority: 'agent-status',
 @@ -172,0 +175 @@ export async function handleAutomationDispatchRequest({
 +      oneShot: !automation.reuseSession,
+@@ -182,2 +185,2 @@ export async function handleAutomationDispatchRequest({
+-      onExit: (_ptyId, code) => {
+-        completion.handleExit(code)
++      onExit: (_ptyId, code, exitCause) => {
++        completion.handleExit(code, exitCause)
 @@ -189,0 +193,2 @@ export async function handleAutomationDispatchRequest({
 +    const freshCompletionAuthority = result.completionAuthority ?? 'agent-status'
 +    completion.setCompletionAuthority(freshCompletionAuthority)
 @@ -205,0 +211 @@ export async function handleAutomationDispatchRequest({
 +        completionAuthority: freshCompletionAuthority,
 diff --git a/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts b/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
-index b8c1cb49c170917b6ad612d194061857bfa00aa5..d0616cb05ae386dafc09a7b443b8c121de386a96 100644
+index b8c1cb49c170917b6ad612d194061857bfa00aa5..0ce5b6b6ac2ff1db75f25cf51cd0f508ac7b4fa5 100644
 --- a/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
 +++ b/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
 @@ -211,0 +212 @@ describe('useAutomationDispatchEvents setup launch', () => {
@@ -486,36 +818,121 @@ index b8c1cb49c170917b6ad612d194061857bfa00aa5..d0616cb05ae386dafc09a7b443b8c121
 @@ -751 +761 @@ describe('useAutomationDispatchEvents setup launch', () => {
 -  it('consumes duplicate done and zero-exit completion through one finalizer', async () => {
 +  it('ignores one-shot agent done and completes only from zero process exit', async () => {
-@@ -757,0 +768 @@ describe('useAutomationDispatchEvents setup launch', () => {
+@@ -754 +764,5 @@ describe('useAutomationDispatchEvents setup launch', () => {
+-      onExit?: (ptyId: string, code: number) => void
++      onExit?: (
++        ptyId: string,
++        code: number,
++        exitCause?: { kind: 'exited'; exitCode: number }
++      ) => void
+@@ -757,0 +772 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +      args.onAgentStatus?.({ state: 'done' })
-@@ -762,0 +774 @@ describe('useAutomationDispatchEvents setup launch', () => {
+@@ -762,0 +778 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'process-exit',
-@@ -770,0 +783,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
+@@ -770,0 +787,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
 +      expect.objectContaining({
 +        status: 'dispatched',
 +        completionAuthority: 'process-exit'
 +      })
 +    )
-@@ -771,0 +790,4 @@ describe('useAutomationDispatchEvents setup launch', () => {
+@@ -772 +794,5 @@ describe('useAutomationDispatchEvents setup launch', () => {
+-    launchArgs.onExit?.('agent-pty', 0)
 +    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
 +    expect(
 +      mockMarkDispatchResult.mock.calls.filter(([result]) => result.status === 'completed')
 +    ).toHaveLength(0)
-@@ -792,0 +815 @@ describe('useAutomationDispatchEvents setup launch', () => {
++    launchArgs.onExit?.('agent-pty', 0, { kind: 'exited', exitCode: 0 })
+@@ -783,0 +810,70 @@ describe('useAutomationDispatchEvents setup launch', () => {
++  it.each([
++    ['人工關閉', { kind: 'operator_close' as const }],
++    ['signal', { kind: 'signaled' as const, signal: 9 }],
++    ['未知原因', { kind: 'unknown' as const, reason: 'cause_unreported' as const }]
++  ])('does not complete one-shot from legacy code 0 with %s cause', async (_label, exitCause) => {
++    let onExit:
++      | ((
++          ptyId: string,
++          code: number,
++          cause?:
++            | { kind: 'operator_close' }
++            | { kind: 'signaled'; signal: number }
++            | { kind: 'unknown'; reason: 'cause_unreported' }
++        ) => void)
++      | undefined
++    mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
++      onExit = args.onExit
++      return {
++        tabId: 'agent-tab',
++        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
++        ptyId: 'agent-pty',
++        startupPlan: {},
++        completionAuthority: 'process-exit',
++        terminalOwnership: {
++          finalize: mockFinalizeTerminalOwnership,
++          release: mockReleaseTerminalOwnership
++        }
++      }
++    })
++
++    await registerAndDispatch()
++    onExit?.('agent-pty', 0, exitCause)
++    await vi.waitFor(() => expect(mockReleaseTerminalOwnership).toHaveBeenCalledOnce())
++
++    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
++    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
++      expect.objectContaining({ status: 'dispatch_failed' })
++    )
++  })
++
++  it('fails one-shot closed when legacy code 0 has no verified cause', async () => {
++    let onExit: ((ptyId: string, code: number) => void) | undefined
++    mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
++      onExit = args.onExit
++      return {
++        tabId: 'agent-tab',
++        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
++        ptyId: 'agent-pty',
++        startupPlan: {},
++        completionAuthority: 'process-exit',
++        terminalOwnership: {
++          finalize: mockFinalizeTerminalOwnership,
++          release: mockReleaseTerminalOwnership
++        }
++      }
++    })
++
++    await registerAndDispatch()
++    onExit?.('agent-pty', 0)
++    await vi.waitFor(() => expect(mockReleaseTerminalOwnership).toHaveBeenCalledOnce())
++
++    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
++    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
++      expect.objectContaining({
++        status: 'dispatch_failed',
++        error: expect.stringContaining('without a verified exit cause')
++      })
++    )
++  })
++
+@@ -792,0 +889 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
-@@ -833,0 +857 @@ describe('useAutomationDispatchEvents setup launch', () => {
+@@ -833,0 +931 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
-@@ -861,0 +886 @@ describe('useAutomationDispatchEvents setup launch', () => {
+@@ -861,0 +960 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
 diff --git a/src/renderer/src/lib/agent-background-session-contract.ts b/src/renderer/src/lib/agent-background-session-contract.ts
-index 26145d313ddbe3eb0d00a3549e4745d125361d00..d605418c7c97c3635d251b5d3fca66d8a0b1a1fd 100644
+index 26145d313ddbe3eb0d00a3549e4745d125361d00..b54329c3947b01810ab7e6cef9359147d09c3cad 100644
 --- a/src/renderer/src/lib/agent-background-session-contract.ts
 +++ b/src/renderer/src/lib/agent-background-session-contract.ts
-@@ -15,0 +16,2 @@ export type LaunchAgentBackgroundSessionArgs = {
+@@ -5,0 +6 @@ import type { AutomationTerminalOwnership } from '@/lib/automation-terminal-owne
++import type { TerminalExitCause } from '../../../shared/terminal-exit-cause'
+@@ -14 +15 @@ export type LaunchAgentBackgroundSessionArgs = {
+-  onExit?: (ptyId: string, code: number) => void
++  onExit?: (ptyId: string, code: number, exitCause?: TerminalExitCause) => void
+@@ -15,0 +17,2 @@ export type LaunchAgentBackgroundSessionArgs = {
 +  /** Automation-only native one-shot launch; interactive/reuse sessions omit this. */
 +  oneShot?: boolean
-@@ -23,0 +26 @@ export type LaunchAgentBackgroundSessionResult = {
+@@ -23,0 +27 @@ export type LaunchAgentBackgroundSessionResult = {
 +  completionAuthority: 'agent-status' | 'process-exit'
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.test.ts b/src/renderer/src/lib/automation-one-shot-startup.test.ts
 new file mode 100644
@@ -890,7 +1307,7 @@ index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3
 +  })
 +
 diff --git a/src/renderer/src/lib/launch-agent-background-session.ts b/src/renderer/src/lib/launch-agent-background-session.ts
-index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..2869ec47c573de223615a7636f13d330af482dcf 100644
+index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..931b4acce61f42aa43ea37e0bf8acba4d3a937f3 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.ts
 +++ b/src/renderer/src/lib/launch-agent-background-session.ts
 @@ -2 +1,0 @@ import { useAppStore } from '@/store'
@@ -946,23 +1363,49 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..2869ec47c573de223615a7636f13d330
 -  const runtimeTarget = getActiveRuntimeTarget(
 -    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 -  )
-@@ -184 +173,3 @@ export async function launchAgentBackgroundSession(
+@@ -139 +128,5 @@ export async function launchAgentBackgroundSession(
+-  const handleExit = (exitPtyId: string, code: number): void => {
++  const handleExit = (
++    exitPtyId: string,
++    code: number,
++    exitCause?: import('../../../shared/terminal-exit-cause').TerminalExitCause
++  ): void => {
+@@ -151 +144,5 @@ export async function launchAgentBackgroundSession(
+-    onExit?.(exitPtyId, code)
++    if (exitCause) {
++      onExit?.(exitPtyId, code, exitCause)
++    } else {
++      onExit?.(exitPtyId, code)
++    }
+@@ -184 +181,3 @@ export async function launchAgentBackgroundSession(
 -        ...(hasPrompt && !isFollowupPath ? { prompt: trimmedPrompt } : {}),
 +        ...(startup.hasPrompt && !startup.isFollowupPath && !startup.oneShot.enabled
 +          ? { prompt: startup.trimmedPrompt }
 +          : {}),
-@@ -249 +240 @@ export async function launchAgentBackgroundSession(
+@@ -249 +248 @@ export async function launchAgentBackgroundSession(
 -    if (agent === 'command-code' && hasPrompt && !isFollowupPath) {
 +    if (agent === 'command-code' && startup.hasPrompt && !startup.isFollowupPath) {
-@@ -257 +248 @@ export async function launchAgentBackgroundSession(
+@@ -257 +256 @@ export async function launchAgentBackgroundSession(
 -          { state: 'working', prompt: trimmedPrompt, agentType: agent, observation },
 +          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent, observation },
-@@ -300,2 +291,2 @@ export async function launchAgentBackgroundSession(
+@@ -287 +286,5 @@ export async function launchAgentBackgroundSession(
+-      eagerPtyBuffer = registerEagerPtyBuffer(ptyId, handleExit, spawned.incarnationId)
++      eagerPtyBuffer = registerEagerPtyBuffer(
++        ptyId,
++        (exitPtyId, code, context) => handleExit(exitPtyId, code, context?.exitCause),
++        spawned.incarnationId
++      )
+@@ -292 +295,3 @@ export async function launchAgentBackgroundSession(
+-      unsubscribeExit = subscribeToPtyExit(ptyId, (code) => handleExit(ptyId, code))
++      unsubscribeExit = subscribeToPtyExit(ptyId, (code, context) =>
++        handleExit(ptyId, code, context?.exitCause)
++      )
+@@ -300,2 +305,2 @@ export async function launchAgentBackgroundSession(
 -    if (pasteDraftAfterLaunch !== null) {
 -      scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
 +    if (startup.pasteDraftAfterLaunch !== null) {
 +      scheduleAgentBackgroundDraft(tab.id, startup.pasteDraftAfterLaunch, agent)
-@@ -304 +295,8 @@ export async function launchAgentBackgroundSession(
+@@ -304 +309,8 @@ export async function launchAgentBackgroundSession(
 -    return { tabId: tab.id, paneKey, ptyId, startupPlan, terminalOwnership }
 +    return {
 +      tabId: tab.id,
