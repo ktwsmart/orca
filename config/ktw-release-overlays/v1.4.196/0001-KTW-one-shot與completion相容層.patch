@@ -1,0 +1,971 @@
+diff --git a/src/main/automations/run-completion-watcher.test.ts b/src/main/automations/run-completion-watcher.test.ts
+index 31c1aea0bb4719281929805f5022b85ce8fbe5f5..a632921e94507248d76cbed879076b3d3046a927 100644
+--- a/src/main/automations/run-completion-watcher.test.ts
++++ b/src/main/automations/run-completion-watcher.test.ts
+@@ -6 +6,5 @@ import type { Repo } from '../../shared/repo-types'
+-import type { Automation, AutomationRun } from '../../shared/automations-types'
++import type {
++  Automation,
++  AutomationRun,
++  AutomationRunCompletionAuthority
++} from '../../shared/automations-types'
+@@ -84 +88,4 @@ function createObserver(
+-  observe: (signal: AbortSignal) => Promise<AutomationRunCompletionObservation>,
++  observe: (
++    signal: AbortSignal,
++    completionAuthority: AutomationRunCompletionAuthority
++  ) => Promise<AutomationRunCompletionObservation>,
+@@ -90 +97,2 @@ function createObserver(
+-    observeCompletion: (_handle, { signal }) => observe(signal)
++    observeCompletion: (_handle, { signal, completionAuthority }) =>
++      observe(signal, completionAuthority)
+@@ -121,0 +130,27 @@ describe('authority-owned automation run completion', () => {
++  it('uses the persisted launch authority and fails old runs safe to agent-status', async () => {
++    const store = await createStore()
++    const automation = createAutomation(store)
++    const seen: AutomationRunCompletionAuthority[] = []
++    const service = new AutomationService(store, {
++      headlessDispatcher: async () => ({ ...LAUNCH_TARGET }),
++      terminalObserver: createObserver(async (_signal, authority) => {
++        seen.push(authority)
++        return { status: 'completed', error: null }
++      })
++    })
++
++    const oldRun = store.createAutomationRun(automation, 1_000, 'manual')
++    store.updateAutomationRun({ runId: oldRun.id, status: 'dispatched', ...LAUNCH_TARGET })
++    const processExitRun = store.createAutomationRun(automation, 2_000, 'manual')
++    store.updateAutomationRun({
++      runId: processExitRun.id,
++      status: 'dispatched',
++      ...LAUNCH_TARGET,
++      terminalPaneKey: 'tab-2:11111111-2222-4333-8444-555555555556',
++      completionAuthority: 'process-exit'
++    })
++    service.start()
++    await vi.waitFor(() => expect(seen).toEqual(['process-exit', 'agent-status']))
++    service.stop()
++  })
++
+diff --git a/src/main/automations/run-completion-watcher.ts b/src/main/automations/run-completion-watcher.ts
+index 4ac125082fbf5de992aeb6d4076b4a9387f8616d..21e5eb34493e3a251b97a9885bc3f6352c26247a 100644
+--- a/src/main/automations/run-completion-watcher.ts
++++ b/src/main/automations/run-completion-watcher.ts
+@@ -4,0 +5 @@ import {
++  type AutomationRunCompletionAuthority,
+@@ -21 +22 @@ export type AutomationRunTerminalObserver = {
+-    options: { signal: AbortSignal }
++    options: { signal: AbortSignal; completionAuthority: AutomationRunCompletionAuthority }
+@@ -118 +119,7 @@ export class AutomationRunCompletionWatcher {
+-      observation = await this.observer.observeCompletion(handle, { signal: controller.signal })
++      observation = await this.observer.observeCompletion(handle, {
++        signal: controller.signal,
++        // Old runs and old renderers never persisted this field. Agent-status is
++        // the only safe fallback because it does not assume an interactive TUI
++        // owns a disposable process.
++        completionAuthority: run.completionAuthority ?? 'agent-status'
++      })
+diff --git a/src/main/automations/runtime-terminal-run-observer.test.ts b/src/main/automations/runtime-terminal-run-observer.test.ts
+index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec8ee86a19 100644
+--- a/src/main/automations/runtime-terminal-run-observer.test.ts
++++ b/src/main/automations/runtime-terminal-run-observer.test.ts
+@@ -89 +89,4 @@ function observe(runtime: AutomationRunTerminalHost) {
+-    .observeCompletion(HANDLE, { signal: controller.signal })
++    .observeCompletion(HANDLE, {
++      signal: controller.signal,
++      completionAuthority: 'agent-status'
++    })
+@@ -125,0 +129,106 @@ describe('createRuntimeAutomationRunTerminalObserver', () => {
++  it('keeps a one-shot run open until its process exits with code zero', async () => {
++    let resolveExit:
++      | ((value: { satisfied: boolean; status: string; exitCode: number | null }) => void)
++      | null = null
++    const runtime: AutomationRunTerminalHost = {
++      getTerminalHandleForPaneKey: () => HANDLE,
++      readTerminal: async () => ({ tail: ['one-shot output'] }),
++      waitForTerminal: (_handle, options) => {
++        expect(options?.condition).toBe('exit')
++        return new Promise((resolve) => {
++          resolveExit = resolve
++        })
++      }
++    }
++    const controller = new AbortController()
++    const promise = createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(HANDLE, {
++      signal: controller.signal,
++      completionAuthority: 'process-exit'
++    })
++    await Promise.resolve()
++    let settled = false
++    void promise.then(() => {
++      settled = true
++    })
++    await Promise.resolve()
++    expect(settled).toBe(false)
++
++    resolveExit!({ satisfied: true, status: 'exited', exitCode: 0 })
++    await expect(promise).resolves.toMatchObject({ status: 'completed', error: null })
++  })
++
++  it('fails a one-shot run when its process exits non-zero', async () => {
++    const runtime: AutomationRunTerminalHost = {
++      getTerminalHandleForPaneKey: () => HANDLE,
++      readTerminal: async () => ({ tail: ['quota reached'] }),
++      waitForTerminal: async (_handle, options) => {
++        expect(options?.condition).toBe('exit')
++        return { satisfied: true, status: 'exited', exitCode: 9 }
++      }
++    }
++    const controller = new AbortController()
++    const result = await createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(
++      HANDLE,
++      { signal: controller.signal, completionAuthority: 'process-exit' }
++    )
++    expect(result.status).toBe('dispatch_failed')
++    expect(result.error).toContain('code 9')
++    expect(result.outputSnapshot?.content).toContain('quota reached')
++  })
++
++  it('fails closed when a one-shot exit has no verified exit code', async () => {
++    const runtime: AutomationRunTerminalHost = {
++      getTerminalHandleForPaneKey: () => HANDLE,
++      readTerminal: async () => ({ tail: ['transport disappeared'] }),
++      waitForTerminal: async () => ({ satisfied: true, status: 'exited', exitCode: null })
++    }
++    const controller = new AbortController()
++    const result = await createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(
++      HANDLE,
++      { signal: controller.signal, completionAuthority: 'process-exit' }
++    )
++    expect(result.status).toBe('dispatch_failed')
++    expect(result.error).toContain('without a verified exit code')
++  })
++
++  it('fails truthfully after the one-shot process exit deadline', async () => {
++    const runtime: AutomationRunTerminalHost = {
++      getTerminalHandleForPaneKey: () => HANDLE,
++      readTerminal: async () => ({ tail: ['still running'] }),
++      waitForTerminal: (_handle, options) =>
++        new Promise((_resolve, reject) => {
++          setTimeout(() => reject(new Error('timeout')), options?.timeoutMs ?? 0)
++        })
++    }
++    const controller = new AbortController()
++    const promise = createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(HANDLE, {
++      signal: controller.signal,
++      completionAuthority: 'process-exit'
++    })
++    await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000)
++    await expect(promise).resolves.toMatchObject({
++      status: 'dispatch_failed',
++      error: expect.stringContaining('after 6h')
++    })
++  })
++
++  it('propagates an abort without inventing a terminal run state', async () => {
++    const runtime: AutomationRunTerminalHost = {
++      getTerminalHandleForPaneKey: () => HANDLE,
++      readTerminal: async () => ({ tail: [] }),
++      waitForTerminal: (_handle, options) =>
++        new Promise((_resolve, reject) => {
++          options?.signal?.addEventListener('abort', () => reject(new Error('request_aborted')), {
++            once: true
++          })
++        })
++    }
++    const controller = new AbortController()
++    const promise = createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(HANDLE, {
++      signal: controller.signal,
++      completionAuthority: 'process-exit'
++    })
++    controller.abort()
++    await expect(promise).rejects.toThrow('request_aborted')
++  })
++
+diff --git a/src/main/automations/runtime-terminal-run-observer.ts b/src/main/automations/runtime-terminal-run-observer.ts
+index 0dc6750e8de167a50c4152a884f13d41908603cb..e726a063ab383f1eace808ec4f49984528dd675e 100644
+--- a/src/main/automations/runtime-terminal-run-observer.ts
++++ b/src/main/automations/runtime-terminal-run-observer.ts
+@@ -32,2 +32,7 @@ export type AutomationRunTerminalHost = {
+-    options?: { condition?: 'tui-idle'; timeoutMs?: number; signal?: AbortSignal }
+-  ): Promise<{ satisfied: boolean; blockedReason?: string }>
++    options?: { condition?: 'exit' | 'tui-idle'; timeoutMs?: number; signal?: AbortSignal }
++  ): Promise<{
++    satisfied: boolean
++    status?: string
++    exitCode?: number | null
++    blockedReason?: string
++  }>
+@@ -147,0 +153,85 @@ async function buildUnobservedObservation(
++async function observeProcessExit(
++  runtime: AutomationRunTerminalHost,
++  handle: string,
++  signal: AbortSignal
++): Promise<AutomationRunCompletionObservation> {
++  let wait: Awaited<ReturnType<AutomationRunTerminalHost['waitForTerminal']>>
++  try {
++    wait = await runtime.waitForTerminal(handle, {
++      condition: 'exit',
++      timeoutMs: OBSERVE_DEADLINE_MS,
++      signal
++    })
++  } catch (error) {
++    if (!isTerminalWaitTimeout(error)) {
++      throw error
++    }
++    return await buildUnobservedObservation(
++      runtime,
++      handle,
++      'Orca stopped watching this one-shot process after 6h without an exit.'
++    )
++  }
++  const outputSnapshot = await readTerminalSnapshot(runtime, handle)
++  if (wait.satisfied && wait.exitCode === 0) {
++    return { status: 'completed', outputSnapshot, error: null }
++  }
++  const detail =
++    typeof wait.exitCode === 'number'
++      ? ` with code ${wait.exitCode}`
++      : ' without a verified exit code'
++  return {
++    status: 'dispatch_failed',
++    outputSnapshot,
++    error: `Automation one-shot process exited${detail}.`
++  }
++}
++
++async function observeAgentStatusCompletion(
++  runtime: AutomationRunTerminalHost,
++  handle: string,
++  signal: AbortSignal
++): Promise<AutomationRunCompletionObservation> {
++  const startedAt = Date.now()
++  // Why: tui-idle is level-triggered, so a reused pane still idle from the
++  // PREVIOUS run satisfies it before this run's agent has typed a character.
++  // Evidence that predates dispatch proves nothing about this run, so require
++  // the pane to leave that state first — the busy edge the renderer's own
++  // dispatch observer requires on reuse (requireWorkingAfterStart).
++  if (await isTuiIdleSatisfiedNow(runtime, handle, signal)) {
++    const started = await waitForAgentStart(
++      runtime,
++      handle,
++      signal,
++      startedAt + AGENT_START_DEADLINE_MS
++    )
++    if (!started) {
++      return await buildUnobservedObservation(
++        runtime,
++        handle,
++        'Automation agent never started after the prompt was submitted.'
++      )
++    }
++  }
++  const deadlineAt = startedAt + OBSERVE_DEADLINE_MS
++  for (;;) {
++    try {
++      const wait = await runtime.waitForTerminal(handle, { condition: 'tui-idle', signal })
++      return await buildObservation(runtime, handle, wait)
++    } catch (error) {
++      // Why: tui-idle waits expire on their own schedule; an agent still
++      // working past that window is live, so re-arm rather than fail it.
++      if (signal.aborted || !isTerminalWaitTimeout(error)) {
++        throw error
++      }
++      if (Date.now() >= deadlineAt) {
++        return await buildUnobservedObservation(
++          runtime,
++          handle,
++          'Orca stopped watching this run after 6h without a completion signal.'
++        )
++      }
++    }
++  }
++}
++
+@@ -154,42 +244,4 @@ export function createRuntimeAutomationRunTerminalObserver(
+-    observeCompletion: async (handle, { signal }) => {
+-      const startedAt = Date.now()
+-      // Why: tui-idle is level-triggered, so a reused pane still idle from the
+-      // PREVIOUS run satisfies it before this run's agent has typed a character.
+-      // Evidence that predates dispatch proves nothing about this run, so require
+-      // the pane to leave that state first — the busy edge the renderer's own
+-      // dispatch observer requires on reuse (requireWorkingAfterStart).
+-      if (await isTuiIdleSatisfiedNow(runtime, handle, signal)) {
+-        const started = await waitForAgentStart(
+-          runtime,
+-          handle,
+-          signal,
+-          startedAt + AGENT_START_DEADLINE_MS
+-        )
+-        if (!started) {
+-          return await buildUnobservedObservation(
+-            runtime,
+-            handle,
+-            'Automation agent never started after the prompt was submitted.'
+-          )
+-        }
+-      }
+-      const deadlineAt = startedAt + OBSERVE_DEADLINE_MS
+-      for (;;) {
+-        try {
+-          const wait = await runtime.waitForTerminal(handle, { condition: 'tui-idle', signal })
+-          return await buildObservation(runtime, handle, wait)
+-        } catch (error) {
+-          // Why: tui-idle waits expire on their own schedule; an agent still
+-          // working past that window is live, so re-arm rather than fail it.
+-          if (signal.aborted || !isTerminalWaitTimeout(error)) {
+-            throw error
+-          }
+-          if (Date.now() >= deadlineAt) {
+-            return await buildUnobservedObservation(
+-              runtime,
+-              handle,
+-              'Orca stopped watching this run after 6h without a completion signal.'
+-            )
+-          }
+-        }
+-      }
++    observeCompletion: async (handle, { signal, completionAuthority }) => {
++      return completionAuthority === 'process-exit'
++        ? await observeProcessExit(runtime, handle, signal)
++        : await observeAgentStatusCompletion(runtime, handle, signal)
+diff --git a/src/main/persistence-automations.test.ts b/src/main/persistence-automations.test.ts
+index 9db16b7e681569ba76628a98afc0f4c12ad3f5d1..e0348510e039d40b5bc449d76a4252ec0af6e10d 100644
+--- a/src/main/persistence-automations.test.ts
++++ b/src/main/persistence-automations.test.ts
+@@ -751,0 +752 @@ describe('Store', () => {
++      completionAuthority: 'process-exit',
+@@ -776 +777,2 @@ describe('Store', () => {
+-      terminalPtyId: 'pty-run'
++      terminalPtyId: 'pty-run',
++      completionAuthority: 'process-exit'
+@@ -777,0 +780,3 @@ describe('Store', () => {
++
++    const reloaded = await createStore()
++    expect(reloaded.listAutomationRuns(automation.id)[0].completionAuthority).toBe('process-exit')
+diff --git a/src/main/persistence/scheduling-automations/automation-run-operations.ts b/src/main/persistence/scheduling-automations/automation-run-operations.ts
+index 639fda7b836b79bb7be9378085fe2e922eb70df7..9edfb77f5f15682dcfedbfdd263e8fecc35dfb45 100644
+--- a/src/main/persistence/scheduling-automations/automation-run-operations.ts
++++ b/src/main/persistence/scheduling-automations/automation-run-operations.ts
+@@ -169,0 +170,3 @@ export function updateAutomationRun(
++    completionAuthority: Object.hasOwn(result, 'completionAuthority')
++      ? result.completionAuthority
++      : current.completionAuthority,
+diff --git a/src/renderer/src/hooks/automation-dispatch-completion.ts b/src/renderer/src/hooks/automation-dispatch-completion.ts
+index 098d1167a380c37936c0f64d031d51d3f542dc3d..2177488d8f3c330250a9c97ad011c331cfbbb703 100644
+--- a/src/renderer/src/hooks/automation-dispatch-completion.ts
++++ b/src/renderer/src/hooks/automation-dispatch-completion.ts
+@@ -9 +9,2 @@ import type {
+-  AutomationRun
++  AutomationRun,
++  AutomationRunCompletionAuthority
+@@ -34,0 +36,4 @@ export function createAutomationDispatchCompletion(args: {
++  // Fresh one-shot authority is selected by the launch plan. Until that plan
++  // returns, a synchronous SessionEnd/done callback is only pending evidence;
++  // it must not win the race against process-exit authority.
++  let completionAuthority: AutomationRunCompletionAuthority | null = null
+@@ -127 +132,4 @@ export function createAutomationDispatchCompletion(args: {
+-    if (!dispatchMarked) {
++    if (completionAuthority === 'process-exit') {
++      return
++    }
++    if (!dispatchMarked || completionAuthority === null) {
+@@ -219,0 +228,6 @@ export function createAutomationDispatchCompletion(args: {
++    setCompletionAuthority: (authority: AutomationRunCompletionAuthority) => {
++      completionAuthority = authority
++      if (authority === 'process-exit') {
++        pendingDone = false
++      }
++    },
+@@ -228 +242,3 @@ export function createAutomationDispatchCompletion(args: {
+-      if (pendingDone) {
++      if (pendingExitCode !== null && completionAuthority === 'process-exit') {
++        await markExitResult(pendingExitCode)
++      } else if (pendingDone && completionAuthority !== 'process-exit') {
+diff --git a/src/renderer/src/hooks/automation-dispatch-handler.ts b/src/renderer/src/hooks/automation-dispatch-handler.ts
+index 6df1a64fb58c26d43644756b9e2f5b4727313de7..3e8ded60f2e5e286485c16787aa01a37e5935bc0 100644
+--- a/src/renderer/src/hooks/automation-dispatch-handler.ts
++++ b/src/renderer/src/hooks/automation-dispatch-handler.ts
+@@ -95,0 +96 @@ export async function handleAutomationDispatchRequest({
++      completion.setCompletionAuthority('agent-status')
+@@ -153,0 +155 @@ export async function handleAutomationDispatchRequest({
++                completionAuthority: 'agent-status',
+@@ -172,0 +175 @@ export async function handleAutomationDispatchRequest({
++      oneShot: !automation.reuseSession,
+@@ -189,0 +193,2 @@ export async function handleAutomationDispatchRequest({
++    const freshCompletionAuthority = result.completionAuthority ?? 'agent-status'
++    completion.setCompletionAuthority(freshCompletionAuthority)
+@@ -205,0 +211 @@ export async function handleAutomationDispatchRequest({
++        completionAuthority: freshCompletionAuthority,
+diff --git a/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts b/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
+index b8c1cb49c170917b6ad612d194061857bfa00aa5..d0616cb05ae386dafc09a7b443b8c121de386a96 100644
+--- a/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
++++ b/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
+@@ -211,0 +212 @@ describe('useAutomationDispatchEvents setup launch', () => {
++      completionAuthority: 'agent-status',
+@@ -296 +297,2 @@ describe('useAutomationDispatchEvents setup launch', () => {
+-        terminalSessionId: 'agent-tab'
++        terminalSessionId: 'agent-tab',
++        completionAuthority: 'agent-status'
+@@ -565,0 +568 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'agent-status',
+@@ -573,0 +577,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
++    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
++      expect.objectContaining({
++        status: 'dispatched',
++        completionAuthority: 'agent-status'
++      })
++    )
+@@ -605,0 +615 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'agent-status',
+@@ -751 +761 @@ describe('useAutomationDispatchEvents setup launch', () => {
+-  it('consumes duplicate done and zero-exit completion through one finalizer', async () => {
++  it('ignores one-shot agent done and completes only from zero process exit', async () => {
+@@ -757,0 +768 @@ describe('useAutomationDispatchEvents setup launch', () => {
++      args.onAgentStatus?.({ state: 'done' })
+@@ -762,0 +774 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'process-exit',
+@@ -770,0 +783,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
++    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
++      expect.objectContaining({
++        status: 'dispatched',
++        completionAuthority: 'process-exit'
++      })
++    )
+@@ -771,0 +790,4 @@ describe('useAutomationDispatchEvents setup launch', () => {
++    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
++    expect(
++      mockMarkDispatchResult.mock.calls.filter(([result]) => result.status === 'completed')
++    ).toHaveLength(0)
+@@ -792,0 +815 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'agent-status',
+@@ -833,0 +857 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'agent-status',
+@@ -861,0 +886 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'agent-status',
+diff --git a/src/renderer/src/lib/agent-background-session-contract.ts b/src/renderer/src/lib/agent-background-session-contract.ts
+index 26145d313ddbe3eb0d00a3549e4745d125361d00..d605418c7c97c3635d251b5d3fca66d8a0b1a1fd 100644
+--- a/src/renderer/src/lib/agent-background-session-contract.ts
++++ b/src/renderer/src/lib/agent-background-session-contract.ts
+@@ -15,0 +16,2 @@ export type LaunchAgentBackgroundSessionArgs = {
++  /** Automation-only native one-shot launch; interactive/reuse sessions omit this. */
++  oneShot?: boolean
+@@ -23,0 +26 @@ export type LaunchAgentBackgroundSessionResult = {
++  completionAuthority: 'agent-status' | 'process-exit'
+diff --git a/src/renderer/src/lib/automation-one-shot-startup.test.ts b/src/renderer/src/lib/automation-one-shot-startup.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b3c94ce59576a542760fbc6a758c1dcdb90f429
+--- /dev/null
++++ b/src/renderer/src/lib/automation-one-shot-startup.test.ts
+@@ -0,0 +1,121 @@
++import { describe, expect, it } from 'vitest'
++import {
++  applyAutomationOneShotCommand,
++  planAutomationOneShotStartup
++} from './automation-one-shot-startup'
++
++const base = {
++  requested: true,
++  agent: 'cursor' as const,
++  agentArgs: '--trust --model grok',
++  hasCommandOverride: false,
++  hasPrompt: true,
++  platform: 'darwin' as const,
++  startupShell: undefined,
++  hasConnection: false,
++  isEnvironment: false,
++  isWsl: false
++}
++
++describe('automation one-shot startup', () => {
++  it('appends a final Cursor print flag without guessing whether earlier tokens are values', () => {
++    expect(planAutomationOneShotStartup(base)).toMatchObject({
++      enabled: true,
++      agentArgs: '--trust --model grok --print',
++      shell: 'posix'
++    })
++    expect(planAutomationOneShotStartup({ ...base, agentArgs: '--trust -p' }).agentArgs).toBe(
++      '--trust -p --print'
++    )
++    expect(
++      planAutomationOneShotStartup({ ...base, agentArgs: "--model 'name -p'" }).agentArgs
++    ).toBe("--model 'name -p' --print")
++    expect(planAutomationOneShotStartup({ ...base, agentArgs: '--print=json' }).agentArgs).toBe(
++      '--print=json --print'
++    )
++    expect(
++      planAutomationOneShotStartup({ ...base, agentArgs: '--output-format json' }).agentArgs
++    ).toBe('--output-format json --print')
++  })
++
++  it('uses Antigravity native one-shot prompt mode', () => {
++    expect(planAutomationOneShotStartup({ ...base, agent: 'antigravity' })).toMatchObject({
++      enabled: true,
++      promptInjectionMode: 'flag-prompt'
++    })
++    expect(
++      planAutomationOneShotStartup({
++        ...base,
++        agent: 'antigravity',
++        agentArgs: '-- --model x'
++      }).enabled
++    ).toBe(false)
++    expect(
++      planAutomationOneShotStartup({
++        ...base,
++        agent: 'antigravity',
++        agentArgs: '--prompt-interactive'
++      }).enabled
++    ).toBe(false)
++    expect(
++      planAutomationOneShotStartup({
++        ...base,
++        agent: 'antigravity',
++        agentArgs: '--prompt-interactive=true'
++      }).enabled
++    ).toBe(false)
++    expect(
++      planAutomationOneShotStartup({
++        ...base,
++        agent: 'antigravity',
++        agentArgs: '--prompt existing'
++      }).enabled
++    ).toBe(false)
++  })
++
++  it.each([
++    ['custom command', { hasCommandOverride: true }],
++    ['SSH', { hasConnection: true }],
++    ['environment', { isEnvironment: true }],
++    ['WSL', { isWsl: true }],
++    ['Windows', { platform: 'win32' as const }],
++    ['Windows client with Linux launch preference', { clientPlatform: 'win32' as const }],
++    ['blank prompt', { hasPrompt: false }],
++    ['other agent', { agent: 'claude' as const }]
++  ])('fails closed for %s', (_label, override) => {
++    expect(planAutomationOneShotStartup({ ...base, ...override }).enabled).toBe(false)
++  })
++
++  it('fails closed when Cursor args cannot be tokenized', () => {
++    expect(
++      planAutomationOneShotStartup({ ...base, agentArgs: '--model "unterminated' }).enabled
++    ).toBe(false)
++  })
++
++  it('fails closed when an option terminator makes appended print a prompt token', () => {
++    expect(planAutomationOneShotStartup({ ...base, agentArgs: '-- -p' }).enabled).toBe(false)
++  })
++
++  it('fails closed when an unpaired trailing escape could swallow appended print', () => {
++    expect(planAutomationOneShotStartup({ ...base, agentArgs: '--trust \\' }).enabled).toBe(false)
++  })
++
++  it('uses a portable sh wrapper and preserves process exit status', () => {
++    const oneShot = planAutomationOneShotStartup(base)
++    const plan = { launchCommand: 'cursor-agent --print task' } as never
++
++    expect(oneShot.shell).toBe('posix')
++    expect(applyAutomationOneShotCommand(plan, oneShot)).toBe('process-exit')
++    expect((plan as { launchCommand: string }).launchCommand).toBe(
++      `exec sh -c 'cursor-agent --print task; orca_status=$?; exit "$orca_status"'`
++    )
++  })
++
++  it('leaves fallback plans untouched and agent-status authoritative', () => {
++    const oneShot = planAutomationOneShotStartup({ ...base, isWsl: true })
++    const plan = { launchCommand: 'cursor-agent task' } as never
++
++    expect(applyAutomationOneShotCommand(plan, oneShot)).toBe('agent-status')
++    expect((plan as { launchCommand: string }).launchCommand).toBe('cursor-agent task')
++  })
++})
+diff --git a/src/renderer/src/lib/automation-one-shot-startup.ts b/src/renderer/src/lib/automation-one-shot-startup.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4968870dbd86dcf85309a828acb0faf12dc90a1
+--- /dev/null
++++ b/src/renderer/src/lib/automation-one-shot-startup.ts
+@@ -0,0 +1,181 @@
++import { buildAgentStartupPlan, type AgentStartupPlan } from '@/lib/tui-agent-startup'
++import type { AgentPromptInjectionMode } from '../../../shared/tui-agent-config'
++import {
++  quoteStartupArg,
++  resolveStartupShell,
++  tokenizeStartupCommand,
++  type AgentStartupShell
++} from '../../../shared/tui-agent-startup-shell'
++import type { TuiAgent } from '../../../shared/tui-agent'
++import { TUI_AGENT_CONFIG } from '../../../shared/tui-agent-config'
++import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
++import { isWslUncPath } from '../../../shared/wsl-paths'
++import { CLIENT_PLATFORM } from '@/lib/new-workspace'
++import { optionName } from '../../../shared/print-mode-headless-command'
++
++export type AutomationOneShotStartupPlan = {
++  enabled: boolean
++  agentArgs: string
++  shell: AgentStartupShell
++  promptInjectionMode: AgentPromptInjectionMode | undefined
++}
++
++export function planAutomationOneShotStartup(args: {
++  requested: boolean | undefined
++  agent: TuiAgent
++  agentArgs: string
++  hasCommandOverride: boolean
++  hasPrompt: boolean
++  clientPlatform?: NodeJS.Platform
++  platform: NodeJS.Platform
++  startupShell: AgentStartupShell | undefined
++  hasConnection: boolean
++  isEnvironment: boolean
++  isWsl: boolean
++}): AutomationOneShotStartupPlan {
++  const fallbackShell = resolveStartupShell(args.platform, args.startupShell)
++  const eligible =
++    args.requested === true &&
++    (args.agent === 'cursor' || args.agent === 'antigravity') &&
++    !args.hasCommandOverride &&
++    args.hasPrompt &&
++    !args.hasConnection &&
++    !args.isEnvironment &&
++    !args.isWsl &&
++    args.platform !== 'win32' &&
++    (args.clientPlatform ?? CLIENT_PLATFORM) !== 'win32'
++  if (!eligible) {
++    return {
++      enabled: false,
++      agentArgs: args.agentArgs,
++      shell: fallbackShell,
++      promptInjectionMode: undefined
++    }
++  }
++
++  const shell = fallbackShell
++  const normalizedAgentArgs = args.agentArgs.trim()
++  const tokenized = tokenizeStartupCommand(normalizedAgentArgs, shell)
++  if (
++    !tokenized.ok ||
++    tokenized.tokens.includes('--') ||
++    tokenized.spans.some((span) => span.divergesFromShell)
++  ) {
++    return {
++      enabled: false,
++      agentArgs: args.agentArgs,
++      shell: fallbackShell,
++      promptInjectionMode: undefined
++    }
++  }
++  if (args.agent === 'antigravity') {
++    if (
++      tokenized.tokens.some((token) => {
++        const name = optionName(token)
++        return name === '-i' || name === '--prompt-interactive' || name === '--prompt'
++      })
++    ) {
++      return {
++        enabled: false,
++        agentArgs: args.agentArgs,
++        shell: fallbackShell,
++        promptInjectionMode: undefined
++      }
++    }
++    return {
++      enabled: true,
++      agentArgs: normalizedAgentArgs,
++      shell,
++      promptInjectionMode: 'flag-prompt'
++    }
++  }
++  // Always append a final native print flag. A print-looking token may actually be
++  // another option's value, while duplicate boolean flags are accepted by Cursor.
++  const agentArgs = `${normalizedAgentArgs} --print`.trim()
++  return { enabled: true, agentArgs, shell, promptInjectionMode: undefined }
++}
++
++export function applyAutomationOneShotCommand(
++  plan: AgentStartupPlan,
++  oneShot: AutomationOneShotStartupPlan
++): 'agent-status' | 'process-exit' {
++  if (!oneShot.enabled) {
++    return 'agent-status'
++  }
++  if (oneShot.shell !== 'posix') {
++    return 'agent-status'
++  }
++  const wrappedCommand = `${plan.launchCommand}; orca_status=$?; exit "$orca_status"`
++  // Why `exec`: this command is typed into an interactive login shell. Replacing that
++  // shell makes the agent wrapper own the PTY lifetime, so its exit becomes a real PTY exit.
++  plan.launchCommand = `exec sh -c ${quoteStartupArg(wrappedCommand, 'posix')}`
++  return 'process-exit'
++}
++
++export function buildAutomationBackgroundStartup(args: {
++  agent: TuiAgent
++  prompt: string | undefined
++  cmdOverrides: Partial<Record<TuiAgent, string>>
++  agentArgs: string
++  agentEnv: Record<string, string>
++  launchHost: { platform: NodeJS.Platform; isRemote: boolean; connectionId?: string | null }
++  runtimeKind: 'local' | 'environment'
++  worktreePath: string
++  terminalWindowsShell: Parameters<
++    typeof resolveLocalWindowsAgentStartupShell
++  >[0]['terminalWindowsShell']
++  oneShotRequested: boolean | undefined
++}): {
++  plan: AgentStartupPlan
++  oneShot: AutomationOneShotStartupPlan
++  trimmedPrompt: string
++  hasPrompt: boolean
++  isFollowupPath: boolean
++  pasteDraftAfterLaunch: string | null
++  completionAuthority: 'agent-status' | 'process-exit'
++} | null {
++  const startupShell = resolveLocalWindowsAgentStartupShell({
++    platform: args.launchHost.platform,
++    isRemote: args.launchHost.isRemote,
++    terminalWindowsShell: args.terminalWindowsShell
++  })
++  const trimmedPrompt = args.prompt?.trim() ?? ''
++  const hasPrompt = trimmedPrompt.length > 0
++  const oneShot = planAutomationOneShotStartup({
++    requested: args.oneShotRequested,
++    agent: args.agent,
++    agentArgs: args.agentArgs,
++    hasCommandOverride: Boolean(args.cmdOverrides[args.agent]?.trim()),
++    hasPrompt,
++    platform: args.launchHost.platform,
++    startupShell,
++    hasConnection: Boolean(args.launchHost.connectionId),
++    isEnvironment: args.runtimeKind === 'environment',
++    isWsl: isWslUncPath(args.worktreePath)
++  })
++  const isFollowupPath = TUI_AGENT_CONFIG[args.agent].promptInjectionMode === 'stdin-after-start'
++  const plan = buildAgentStartupPlan({
++    agent: args.agent,
++    prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',
++    cmdOverrides: args.cmdOverrides,
++    agentArgs: oneShot.agentArgs,
++    agentEnv: args.agentEnv,
++    platform: args.launchHost.platform,
++    shell: oneShot.shell,
++    promptInjectionModeOverride: oneShot.promptInjectionMode,
++    isRemote: args.launchHost.isRemote,
++    allowEmptyPromptLaunch: !hasPrompt || isFollowupPath
++  })
++  if (!plan) {
++    return null
++  }
++  return {
++    plan,
++    oneShot,
++    trimmedPrompt,
++    hasPrompt,
++    isFollowupPath,
++    pasteDraftAfterLaunch: hasPrompt && isFollowupPath ? trimmedPrompt : null,
++    completionAuthority: applyAutomationOneShotCommand(plan, oneShot)
++  }
++}
+diff --git a/src/renderer/src/lib/launch-agent-background-session.test.ts b/src/renderer/src/lib/launch-agent-background-session.test.ts
+index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3c0b532c7 100644
+--- a/src/renderer/src/lib/launch-agent-background-session.test.ts
++++ b/src/renderer/src/lib/launch-agent-background-session.test.ts
+@@ -30,0 +31 @@ const mockGetAgentLaunchPlatformForRepo = vi.fn<() => NodeJS.Platform>()
++const mockGetClientLoginShell = vi.fn(() => '/bin/zsh')
+@@ -38,0 +40 @@ const state = createAgentBackgroundSessionTestState({
++
+@@ -47,0 +50,2 @@ vi.mock('@/store', () => ({
++vi.mock('@/lib/client-login-shell', () => ({ getClientLoginShell: mockGetClientLoginShell }))
++
+@@ -71,0 +76 @@ describe('launchAgentBackgroundSession', () => {
++    mockGetClientLoginShell.mockReturnValue('/bin/zsh')
+@@ -92,0 +98,44 @@ describe('launchAgentBackgroundSession', () => {
++  it('launches Antigravity automation as native one-shot and makes process exit authoritative', async () => {
++    Object.assign(state.settings, {
++      agentDefaultArgs: { antigravity: '--model claude-sonnet-4-6 --print-timeout 10m' }
++    })
++    const { launchAgentBackgroundSession } = await import('./launch-agent-background-session')
++
++    const result = await launchAgentBackgroundSession({
++      agent: 'antigravity',
++      worktreeId: 'wt-1',
++      prompt: 'run the audit',
++      oneShot: true
++    })
++
++    const command = mockSpawn.mock.calls[0]?.[0]?.command as string
++    expect(command).toMatch(/^exec sh -c /)
++    expect(command).toContain('agy')
++    expect(command).toContain('--prompt')
++    expect(command).toContain('run the audit')
++    expect(command).toContain('orca_status=$?')
++    expect(result?.completionAuthority).toBe('process-exit')
++  })
++
++  it('forces a final Cursor print flag for one-shot automation', async () => {
++    Object.assign(state.settings, { agentDefaultArgs: { cursor: '--trust --model grok' } })
++    const { launchAgentBackgroundSession } = await import('./launch-agent-background-session')
++
++    const result = await launchAgentBackgroundSession({
++      agent: 'cursor',
++      worktreeId: 'wt-1',
++      prompt: 'run the audit',
++      oneShot: true
++    })
++
++    const command = mockSpawn.mock.calls[0]?.[0]?.command as string
++    expect(command).toMatch(/^exec sh -c /)
++    expect(command).toContain('cursor-agent')
++    expect(command).toContain('--trust')
++    expect(command).toContain('--model')
++    expect(command).toContain('grok')
++    expect(command).toContain('run the audit')
++    expect(command.match(/--print/g)).toHaveLength(1)
++    expect(result?.completionAuthority).toBe('process-exit')
++  })
++
+diff --git a/src/renderer/src/lib/launch-agent-background-session.ts b/src/renderer/src/lib/launch-agent-background-session.ts
+index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..2869ec47c573de223615a7636f13d330af482dcf 100644
+--- a/src/renderer/src/lib/launch-agent-background-session.ts
++++ b/src/renderer/src/lib/launch-agent-background-session.ts
+@@ -2 +1,0 @@ import { useAppStore } from '@/store'
+-import { buildAgentStartupPlan } from '@/lib/tui-agent-startup'
+@@ -6,0 +6 @@ import type {
++import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
+@@ -34 +33,0 @@ import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-p
+-import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
+@@ -56 +55 @@ export async function launchAgentBackgroundSession(
+-  const agentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
++  const defaultAgentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
+@@ -64,0 +64,3 @@ export async function launchAgentBackgroundSession(
++  const runtimeTarget = getActiveRuntimeTarget(
++    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
++  )
+@@ -77,12 +79 @@ export async function launchAgentBackgroundSession(
+-  const { platform: launchPlatform, isRemote } = launchHost
+-  const startupShell = resolveLocalWindowsAgentStartupShell({
+-    platform: launchPlatform,
+-    isRemote,
+-    terminalWindowsShell: store.settings?.terminalWindowsShell
+-  })
+-  const trimmedPrompt = prompt?.trim() ?? ''
+-  const hasPrompt = trimmedPrompt.length > 0
+-  const isFollowupPath = requireTuiAgentConfig(agent).promptInjectionMode === 'stdin-after-start'
+-
+-  const pasteDraftAfterLaunch = hasPrompt && isFollowupPath ? trimmedPrompt : null
+-  const startupPlan = buildAgentStartupPlan({
++  const startup = buildAutomationBackgroundStartup({
+@@ -90 +81 @@ export async function launchAgentBackgroundSession(
+-    prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',
++    prompt,
+@@ -92 +83 @@ export async function launchAgentBackgroundSession(
+-    agentArgs,
++    agentArgs: defaultAgentArgs,
+@@ -94,4 +85,5 @@ export async function launchAgentBackgroundSession(
+-    platform: launchPlatform,
+-    shell: startupShell,
+-    isRemote,
+-    allowEmptyPromptLaunch: !hasPrompt || isFollowupPath
++    launchHost,
++    runtimeKind: runtimeTarget.kind,
++    worktreePath: worktree.path,
++    terminalWindowsShell: store.settings?.terminalWindowsShell,
++    oneShotRequested: args.oneShot
+@@ -99 +91 @@ export async function launchAgentBackgroundSession(
+-  if (!startupPlan) {
++  if (!startup) {
+@@ -101,0 +94 @@ export async function launchAgentBackgroundSession(
++  const startupPlan = startup.plan
+@@ -124,4 +116,0 @@ export async function launchAgentBackgroundSession(
+-  // Route by the worktree's owner host, not the focused runtime.
+-  const runtimeTarget = getActiveRuntimeTarget(
+-    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
+-  )
+@@ -184 +173,3 @@ export async function launchAgentBackgroundSession(
+-        ...(hasPrompt && !isFollowupPath ? { prompt: trimmedPrompt } : {}),
++        ...(startup.hasPrompt && !startup.isFollowupPath && !startup.oneShot.enabled
++          ? { prompt: startup.trimmedPrompt }
++          : {}),
+@@ -249 +240 @@ export async function launchAgentBackgroundSession(
+-    if (agent === 'command-code' && hasPrompt && !isFollowupPath) {
++    if (agent === 'command-code' && startup.hasPrompt && !startup.isFollowupPath) {
+@@ -257 +248 @@ export async function launchAgentBackgroundSession(
+-          { state: 'working', prompt: trimmedPrompt, agentType: agent, observation },
++          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent, observation },
+@@ -300,2 +291,2 @@ export async function launchAgentBackgroundSession(
+-    if (pasteDraftAfterLaunch !== null) {
+-      scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
++    if (startup.pasteDraftAfterLaunch !== null) {
++      scheduleAgentBackgroundDraft(tab.id, startup.pasteDraftAfterLaunch, agent)
+@@ -304 +295,8 @@ export async function launchAgentBackgroundSession(
+-    return { tabId: tab.id, paneKey, ptyId, startupPlan, terminalOwnership }
++    return {
++      tabId: tab.id,
++      paneKey,
++      ptyId,
++      startupPlan,
++      terminalOwnership,
++      completionAuthority: startup.completionAuthority
++    }
+diff --git a/src/shared/automations-types.ts b/src/shared/automations-types.ts
+index 24d9345242d447288029f6a2f8cbab358d84eb85..df15fa61566f67981d4261e80f0b24dca23fd554 100644
+--- a/src/shared/automations-types.ts
++++ b/src/shared/automations-types.ts
+@@ -154,0 +155,4 @@ export type AutomationRun = {
++  /** Completion authority selected by the launch plan for this exact run.
++   *  Missing on older records and runtimes; consumers must fail safe to
++   *  agent-status rather than assuming the process is disposable. */
++  completionAuthority?: AutomationRunCompletionAuthority
+@@ -233,0 +238 @@ export type AutomationDispatchResult = {
++  completionAuthority?: AutomationRunCompletionAuthority
+@@ -239,0 +245,2 @@ export type AutomationDispatchResult = {
++export type AutomationRunCompletionAuthority = 'agent-status' | 'process-exit'
++
+diff --git a/src/shared/tui-agent-startup.test.ts b/src/shared/tui-agent-startup.test.ts
+index e5e26f4680273d4c306e77bf04fa2d74482905e9..33213fe67cabd29e60f443e0f2e8a5e49df21afc 100644
+--- a/src/shared/tui-agent-startup.test.ts
++++ b/src/shared/tui-agent-startup.test.ts
+@@ -718,0 +719,15 @@ describe('tui agent startup plans', () => {
++
++  it('allows automation to use Antigravity native one-shot prompt without changing TUI defaults', () => {
++    const plan = buildAgentStartupPlan({
++      agent: 'antigravity',
++      prompt: 'audit now',
++      cmdOverrides: {},
++      agentArgs: '--model claude-sonnet-4-6',
++      platform: 'darwin',
++      shell: 'posix',
++      promptInjectionModeOverride: 'flag-prompt'
++    })
++
++    expect(plan?.launchCommand).toBe("agy '--model' 'claude-sonnet-4-6' --prompt 'audit now'")
++    expect(TUI_AGENT_CONFIG.antigravity.promptInjectionMode).toBe('flag-prompt-interactive')
++  })
+diff --git a/src/shared/tui-agent-startup.ts b/src/shared/tui-agent-startup.ts
+index fba16776378020cc5016b6a4cfe597739d4bbd88..1527a9ec6459316949fbecb116061016231dfac3 100644
+--- a/src/shared/tui-agent-startup.ts
++++ b/src/shared/tui-agent-startup.ts
+@@ -10 +10 @@ import {
+-import { TUI_AGENT_CONFIG } from './tui-agent-config'
++import { TUI_AGENT_CONFIG, type AgentPromptInjectionMode } from './tui-agent-config'
+@@ -48,0 +49 @@ export function buildAgentStartupPlan(args: {
++  promptInjectionModeOverride?: AgentPromptInjectionMode
+@@ -59 +60,2 @@ export function buildAgentStartupPlan(args: {
+-  const usesQuery = config.promptInjectionMode === 'hermes-query' && Boolean(trimmedPrompt)
++  const promptInjectionMode = args.promptInjectionModeOverride ?? config.promptInjectionMode
++  const usesQuery = promptInjectionMode === 'hermes-query' && Boolean(trimmedPrompt)
+@@ -97 +99 @@ export function buildAgentStartupPlan(args: {
+-  if (config.promptInjectionMode === 'argv') {
++  if (promptInjectionMode === 'argv') {
+@@ -111 +113 @@ export function buildAgentStartupPlan(args: {
+-  if (config.promptInjectionMode === 'flag-prompt') {
++  if (promptInjectionMode === 'flag-prompt') {
+@@ -123 +125 @@ export function buildAgentStartupPlan(args: {
+-  if (config.promptInjectionMode === 'hermes-query') {
++  if (promptInjectionMode === 'hermes-query') {
+@@ -149 +151 @@ export function buildAgentStartupPlan(args: {
+-  if (config.promptInjectionMode === 'flag-prompt-interactive') {
++  if (promptInjectionMode === 'flag-prompt-interactive') {
+@@ -161 +163 @@ export function buildAgentStartupPlan(args: {
+-  if (config.promptInjectionMode === 'flag-interactive') {
++  if (promptInjectionMode === 'flag-interactive') {
