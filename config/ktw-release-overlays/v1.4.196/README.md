@@ -1,6 +1,6 @@
 # KTW Orca v1.4.196 最小相容發行層
 
-施作者：Codex；更新時間：2026-09-03 13:50 +0800。
+施作者：Codex；更新時間：2026-09-03 14:21 +0800。
 
 這個 overlay 疊到官方 `v1.4.196` tag 的 peeled exact commit
 `aad4ae42ea5e555f25fdec679ebbcd18cc1e8911`。官方版本已包含：
@@ -33,13 +33,18 @@ one-shot 啟動與 completion authority。
 - local main process 會把可信 exit cause 經 preload、PTY dispatcher 與 eager
   pre-handler buffer 傳到 renderer；即使 node-pty 的 legacy code 是 0，人工關閉、
   signal 或未知 cause 也不能被 renderer race 誤寫為 completed；
+- operator-close 分類由 runtime 把 host cause 與精確 stop request 合併後回傳，避免
+  orphan／kill-all 或 `stop_unverified` 被全域覆寫；reuse observer 會拆開
+  `PtyExitContext`，不把 context 外殼誤當成 cause；
+- Cursor 若以未知／需值 option 結尾（例如懸空 `--model`），會退回 agent-status，
+  不讓尾接的 `--print` 被吃成 option value 而形成長時間卡住；
 - early `done` 在 launch plan 尚未回傳時只作 pending evidence；若最終 authority 是
   process-exit，該 pending done 必須丟棄，避免 race 假完成；
 - reuse／remote／不安全 shell 維持官方 agent-status 行為，fail closed 不強行 one-shot。
 
 ## 驗證契約
 
-`manifest.json` 綁定官方 base、30 個允許路徑、zero-context full-index patch SHA-256
+`manifest.json` 綁定官方 base、36 個允許路徑、zero-context full-index patch SHA-256
 與完整 output tree SHA。required static-analysis 會先從官方 upstream 精確抓取
 v1.4.192／v1.4.196 兩個 base commit，再逐份物化驗證；驗證器使用 temporary Git
 index，不修改目前工作樹：
@@ -50,10 +55,10 @@ node config/scripts/verify-ktw-release-overlay.mjs \
 ```
 
 本候選已以官方 v1.4.196 精確依賴通過：one-shot／completion／exit-cause 鏈路
-13 個測試檔 266 項（包含官方 retained-PTY hydration／swap；large inventory fixture
+15 個測試檔 288 項（包含官方 retained-PTY hydration／swap；large inventory fixture
 為 150,000 sessions，涵蓋本機 32-session 規模）、typecheck、`build:unpack`。
 打包候選 app.asar SHA-256 為
-`365819885c06e9128f7ad4390ab7a6367bdb6824233ad7249b1be246b30b7449`。
+`831324c1699665df5adee5692eda3dc5e5912f7d3dd0e2b357036ab32b09a169`。
 
 recipe 本身不安裝 App、不停止 daemon，也不讀寫 credential。正式換版仍須另案 Slack
 核准，並以 preinstall 全部 `ptyId + incarnationId` 的 N/N continuity、原 daemon PID

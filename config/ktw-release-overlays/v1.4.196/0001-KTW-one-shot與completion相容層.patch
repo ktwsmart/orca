@@ -433,27 +433,30 @@ index 2200b2b6043d5b1102819d83de7c167b3f79ddaf..3b29419acea1630d4502a88abd02f28e
 -      [['pty:exit', { id: 'local-pty', code: 0 }]]
 +      [['pty:exit', { id: 'local-pty', code: 0, exitCause: { kind: 'operator_close' } }]]
 diff --git a/src/main/ipc/pty/delivery/exit.ts b/src/main/ipc/pty/delivery/exit.ts
-index 3825be5119272836b43b8ec2d1f95bc428aa458f..0209b5ed9a6f7f3b342409d96be40376fb4b8511 100644
+index 3825be5119272836b43b8ec2d1f95bc428aa458f..94b0a04c7e27469d4fbadf9c129a5319ed3599a4 100644
 --- a/src/main/ipc/pty/delivery/exit.ts
 +++ b/src/main/ipc/pty/delivery/exit.ts
-@@ -10,0 +11,8 @@ import type { PtyIpcSession } from '../session'
-+import type { TerminalExitCause } from '../../../../shared/terminal-exit-cause'
-+
-+type RendererPtyExitPayload = {
-+  id: string
-+  code: number
-+  incarnationId?: string
-+  exitCause?: TerminalExitCause
-+}
-@@ -49 +57 @@ export function preparePtyExitForRenderer(
+@@ -10 +10 @@ import { clearFlushTimerIfIdle } from './flush'
+-import type { PtyIpcSession } from '../session'
++import type { PtyIpcSession, RendererPtyExitPayload } from '../session'
+@@ -49 +49 @@ export function preparePtyExitForRenderer(
 -  payload: { id: string; code: number; incarnationId?: string }
 +  payload: RendererPtyExitPayload
-@@ -115 +123 @@ export function finalizePtyExitForRenderer(
+@@ -115 +115 @@ export function finalizePtyExitForRenderer(
 -  payload: { id: string; code: number; incarnationId?: string }
 +  payload: RendererPtyExitPayload
-@@ -158 +166 @@ export function sendPtyExitToRenderer(
+@@ -158 +158 @@ export function sendPtyExitToRenderer(
 -  payload: { id: string; code: number; incarnationId?: string }
 +  payload: RendererPtyExitPayload
+diff --git a/src/main/ipc/pty/ipc/renderer-kill.ts b/src/main/ipc/pty/ipc/renderer-kill.ts
+index ecdde7088f9e628b1ca2515fe1588a1a86859a1b..edc428479d429864d72319da4e244cb15e81bcb1 100644
+--- a/src/main/ipc/pty/ipc/renderer-kill.ts
++++ b/src/main/ipc/pty/ipc/renderer-kill.ts
+@@ -10,0 +11 @@ import { recordUndeliveredSshPtyKill } from '../runtime/undelivered-ssh-kill'
++import type { RendererPtyExitPayload } from '../session'
+@@ -22 +23 @@ export type PtyKillIpcDeps = {
+-  sendPtyExitToRenderer: (payload: { id: string; code: number; incarnationId?: string }) => void
++  sendPtyExitToRenderer: (payload: RendererPtyExitPayload) => void
 diff --git a/src/main/ipc/pty/provider/bind-listeners.ts b/src/main/ipc/pty/provider/bind-listeners.ts
 index 8febd1e3534fcf38a7c0af396fe0aa18b234614d..d3a98afedf607a29c621266bb532cdedf29d9149 100644
 --- a/src/main/ipc/pty/provider/bind-listeners.ts
@@ -466,6 +469,58 @@ index 8febd1e3534fcf38a7c0af396fe0aa18b234614d..d3a98afedf607a29c621266bb532cded
 +        // child-status boundary. Remote/legacy providers omit it and renderer
 +        // one-shot completion fails closed instead of guessing from code 0.
 +        ...(payload.cause ? { exitCause: payload.cause } : {}),
+diff --git a/src/main/ipc/pty/provider/local-configure.ts b/src/main/ipc/pty/provider/local-configure.ts
+index 1ebf0248e12758d159404301cfa6676fccc256de..b34e8674c8c0f77af4abf676c50d522b07c73e05 100644
+--- a/src/main/ipc/pty/provider/local-configure.ts
++++ b/src/main/ipc/pty/provider/local-configure.ts
+@@ -108,4 +108,6 @@ export function configureLocalPtyProvider(args: {
+-      runtime?.onPtyExit(id, code, incarnationId, {
+-        providerExitObserved: true,
+-        ...(cause ? { cause } : {})
+-      })
++      return (
++        runtime?.onPtyExit(id, code, incarnationId, {
++          providerExitObserved: true,
++          ...(cause ? { cause } : {})
++        }) ?? cause
++      )
+diff --git a/src/main/ipc/pty/runtime/controller-deps.ts b/src/main/ipc/pty/runtime/controller-deps.ts
+index da6c45ce5c5a9a99ff3eaf9fd8cb5b557bb184fa..e60d4b9f60c34e4f2a533b1eb123207ec518a4d8 100644
+--- a/src/main/ipc/pty/runtime/controller-deps.ts
++++ b/src/main/ipc/pty/runtime/controller-deps.ts
+@@ -20,0 +21 @@ import type { finishPtyShutdown } from '../provider/liveness'
++import type { RendererPtyExitPayload } from '../session'
+@@ -73 +74 @@ export type PtyRuntimeControllerDeps = {
+-  sendPtyExitToRenderer: (payload: { id: string; code: number; incarnationId?: string }) => void
++  sendPtyExitToRenderer: (payload: RendererPtyExitPayload) => void
+diff --git a/src/main/ipc/pty/session.ts b/src/main/ipc/pty/session.ts
+index 423ecabbe3d6f73217356a898e0b356dd6107284..2afbc115fe70c1251b3f0d2dc880e91542d4ddba 100644
+--- a/src/main/ipc/pty/session.ts
++++ b/src/main/ipc/pty/session.ts
+@@ -22,0 +23,8 @@ import { tryGetProviderForPty } from './provider/registry'
++import type { TerminalExitCause } from '../../../shared/terminal-exit-cause'
++
++export type RendererPtyExitPayload = {
++  id: string
++  code: number
++  incarnationId?: string
++  exitCause?: TerminalExitCause
++}
+@@ -138,11 +146,3 @@ export type PtyIpcSession = {
+-  preparePtyExitForRenderer: (payload: {
+-    id: string
+-    code: number
+-    incarnationId?: string
+-  }) => (() => void) | null
+-  finalizePtyExitForRenderer: (payload: {
+-    id: string
+-    code: number
+-    incarnationId?: string
+-  }) => void
+-  sendPtyExitToRenderer: (payload: { id: string; code: number; incarnationId?: string }) => void
++  preparePtyExitForRenderer: (payload: RendererPtyExitPayload) => (() => void) | null
++  finalizePtyExitForRenderer: (payload: RendererPtyExitPayload) => void
++  sendPtyExitToRenderer: (payload: RendererPtyExitPayload) => void
 diff --git a/src/main/persistence-automations.test.ts b/src/main/persistence-automations.test.ts
 index 9db16b7e681569ba76628a98afc0f4c12ad3f5d1..e0348510e039d40b5bc449d76a4252ec0af6e10d 100644
 --- a/src/main/persistence-automations.test.ts
@@ -488,36 +543,40 @@ index 639fda7b836b79bb7be9378085fe2e922eb70df7..9edfb77f5f15682dcfedbfdd263e8fec
 +    completionAuthority: Object.hasOwn(result, 'completionAuthority')
 +      ? result.completionAuthority
 +      : current.completionAuthority,
-diff --git a/src/main/providers/local-pty-provider-shutdown.test.ts b/src/main/providers/local-pty-provider-shutdown.test.ts
-index cb7595800c1041772ee826a4716f0fe19275fd6e..200882e6b807f8056919c3438f9a14e32c0f97e4 100644
---- a/src/main/providers/local-pty-provider-shutdown.test.ts
-+++ b/src/main/providers/local-pty-provider-shutdown.test.ts
-@@ -182,4 +182 @@ describe('LocalPtyProvider', () => {
--      expect(onExit).toHaveBeenCalledWith(id, -1, incarnationId, {
--        kind: 'unknown',
--        reason: 'stop_unverified'
--      })
-+      expect(onExit).toHaveBeenCalledWith(id, -1, incarnationId, { kind: 'operator_close' })
+diff --git a/src/main/providers/local-pty-provider-types.ts b/src/main/providers/local-pty-provider-types.ts
+index c0eaaaa5ed0cecc009ef1a3bdd8c2c89126c8f52..76f06d8ebba0faa5235164e4f9b1b74765621099 100644
+--- a/src/main/providers/local-pty-provider-types.ts
++++ b/src/main/providers/local-pty-provider-types.ts
+@@ -29 +29,6 @@ export type LocalPtyProviderOptions = {
+-  onExit?: (id: string, code: number, incarnationId: string, cause?: TerminalExitCause) => void
++  onExit?: (
++    id: string,
++    code: number,
++    incarnationId: string,
++    cause?: TerminalExitCause
++  ) => TerminalExitCause | null | void
 diff --git a/src/main/providers/local-pty-session-activation.ts b/src/main/providers/local-pty-session-activation.ts
-index a5991581f82f941d6651fb07d9ad81b7b3855443..74d683e34dc61dfada6263cc5d290589fb24022b 100644
+index a5991581f82f941d6651fb07d9ad81b7b3855443..3837d2ff2c91503cdcedb0864abb5da6311883af 100644
 --- a/src/main/providers/local-pty-session-activation.ts
 +++ b/src/main/providers/local-pty-session-activation.ts
-@@ -5 +5,4 @@ import { resolvePtyOwnerBackend } from '../../shared/pty-owner-backend'
--import { resolveProcessExitCause } from '../../shared/terminal-exit-cause'
-+import {
-+  OPERATOR_CLOSE_EXIT_CAUSE,
-+  resolveProcessExitCause
-+} from '../../shared/terminal-exit-cause'
-@@ -148 +151,5 @@ export function activateLocalPtySession(args: {
+@@ -148 +148,4 @@ export function activateLocalPtySession(args: {
 -    getOptions().onExit?.(id, exitCode, incarnationId, cause)
-+    // Why: node-pty can report a graceful operator stop as exitCode 0. Preserve
-+    // the already-captured termination intent so renderer one-shot completion
-+    // cannot mistake a user close for a successful autonomous exit.
-+    const reportedCause = wasTerminationRequested ? OPERATOR_CLOSE_EXIT_CAUSE : cause
-+    getOptions().onExit?.(id, exitCode, incarnationId, reportedCause)
-@@ -150 +157 @@ export function activateLocalPtySession(args: {
++    // Main runtime is the authority that combines host evidence with Orca's
++    // exact stop request. Its returned cause is forwarded to renderer sidecars;
++    // standalone provider users keep the host-derived cause unchanged.
++    const reportedCause = getOptions().onExit?.(id, exitCode, incarnationId, cause) ?? cause
+@@ -150 +153 @@ export function activateLocalPtySession(args: {
 -      cb({ id, code: exitCode, incarnationId, cause })
 +      cb({ id, code: exitCode, incarnationId, cause: reportedCause })
+diff --git a/src/main/runtime/orca-runtime-on-pty-exit.ts b/src/main/runtime/orca-runtime-on-pty-exit.ts
+index 07f8d4fbbd451f381599d5c3e69d849e6c7fa137..b62cf743876b5dee4f6b03c8c232aa14d7a9f173 100644
+--- a/src/main/runtime/orca-runtime-on-pty-exit.ts
++++ b/src/main/runtime/orca-runtime-on-pty-exit.ts
+@@ -28 +28 @@ export class OrcaRuntimeWithOnPtyExit extends OrcaRuntimeWithOnClientDisconnecte
+-  ): void {
++  ): TerminalExitCause | undefined {
+@@ -251,0 +252 @@ export class OrcaRuntimeWithOnPtyExit extends OrcaRuntimeWithOnClientDisconnecte
++    return exitCause
 diff --git a/src/preload/api/pty-api.ts b/src/preload/api/pty-api.ts
 index 7eee16ea52268d110f22aef1f3e6c97bd572d91e..2b9cd04c9d52ff9965407856f13870df38b33486 100644
 --- a/src/preload/api/pty-api.ts
@@ -609,7 +668,7 @@ index a01e09c2d8fb4a63fc0213a3fac218897ce8aa2e..6568aa52d09d08156e4d6dafff7894dd
 +        ...(delivery.exitCause ? { exitCause: delivery.exitCause } : {})
 +      })
 diff --git a/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.test.ts b/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.test.ts
-index a8f4a706a892087f9b821cb5bb19fde4861175b5..660deb23e2b72948022788f784edbbe6ad5274c0 100644
+index a8f4a706a892087f9b821cb5bb19fde4861175b5..d9b48bf84cc5d31170477e9711d0974210b75737 100644
 --- a/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.test.ts
 +++ b/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.test.ts
 @@ -145,0 +146,12 @@ describe('pre-handler PTY buffer', () => {
@@ -620,13 +679,13 @@ index a8f4a706a892087f9b821cb5bb19fde4861175b5..660deb23e2b72948022788f784edbbe6
 +    drainPreHandlerPtyExit(EXIT_PTY_ID, onExit, FRESH_INCARNATION_ID)
 +
 +    expect(onExit).toHaveBeenCalledWith(0, {
-+      hadPrimary: false,
++      hadPrimary: true,
 +      exitCause: { kind: 'operator_close' }
 +    })
 +  })
 +
 diff --git a/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.ts b/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.ts
-index bbe4b783ee9db93766d946d9f5f61bdde96c0869..c2d705d5bbd471b680bab907adec78b31c632b17 100644
+index bbe4b783ee9db93766d946d9f5f61bdde96c0869..15bd7e67ea9c149aa3211b9b2fe7a6f0ad97e0d3 100644
 --- a/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.ts
 +++ b/src/renderer/src/components/terminal-pane/pty-pre-handler-buffer.ts
 @@ -3,0 +4,2 @@ import type { PtyDataMeta } from './pty-dispatcher'
@@ -648,7 +707,7 @@ index bbe4b783ee9db93766d946d9f5f61bdde96c0869..c2d705d5bbd471b680bab907adec78b3
 @@ -345 +350,5 @@ export function drainPreHandlerPtyExit(
 -    handler(exit.code)
 +    if (exit.exitCause) {
-+      handler(exit.code, { hadPrimary: false, exitCause: exit.exitCause })
++      handler(exit.code, { hadPrimary: true, exitCause: exit.exitCause })
 +    } else {
 +      handler(exit.code)
 +    }
@@ -936,10 +995,10 @@ index 26145d313ddbe3eb0d00a3549e4745d125361d00..b54329c3947b01810ab7e6cef9359147
 +  completionAuthority: 'agent-status' | 'process-exit'
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.test.ts b/src/renderer/src/lib/automation-one-shot-startup.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b3c94ce59576a542760fbc6a758c1dcdb90f429
+index 0000000000000000000000000000000000000000..0c404cdd93ab0bfeed3cdd8bcaf48c9163f5aa74
 --- /dev/null
 +++ b/src/renderer/src/lib/automation-one-shot-startup.test.ts
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,128 @@
 +import { describe, expect, it } from 'vitest'
 +import {
 +  applyAutomationOneShotCommand,
@@ -1038,6 +1097,13 @@ index 0000000000000000000000000000000000000000..5b3c94ce59576a542760fbc6a758c1dc
 +    expect(planAutomationOneShotStartup({ ...base, agentArgs: '-- -p' }).enabled).toBe(false)
 +  })
 +
++  it('fails closed when a trailing Cursor option can consume the appended print flag', () => {
++    expect(planAutomationOneShotStartup({ ...base, agentArgs: '--model' })).toMatchObject({
++      enabled: false,
++      agentArgs: '--model'
++    })
++  })
++
 +  it('fails closed when an unpaired trailing escape could swallow appended print', () => {
 +    expect(planAutomationOneShotStartup({ ...base, agentArgs: '--trust \\' }).enabled).toBe(false)
 +  })
@@ -1063,10 +1129,10 @@ index 0000000000000000000000000000000000000000..5b3c94ce59576a542760fbc6a758c1dc
 +})
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.ts b/src/renderer/src/lib/automation-one-shot-startup.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e4968870dbd86dcf85309a828acb0faf12dc90a1
+index 0000000000000000000000000000000000000000..be57c169c9cfcd44f15fdc2666d06d28b690d5f2
 --- /dev/null
 +++ b/src/renderer/src/lib/automation-one-shot-startup.ts
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,199 @@
 +import { buildAgentStartupPlan, type AgentStartupPlan } from '@/lib/tui-agent-startup'
 +import type { AgentPromptInjectionMode } from '../../../shared/tui-agent-config'
 +import {
@@ -1088,6 +1154,8 @@ index 0000000000000000000000000000000000000000..e4968870dbd86dcf85309a828acb0faf
 +  shell: AgentStartupShell
 +  promptInjectionMode: AgentPromptInjectionMode | undefined
 +}
++
++const CURSOR_TERMINAL_BOOLEAN_OPTIONS = new Set(['--trust', '--force', '--yolo', '--print', '-p'])
 +
 +export function planAutomationOneShotStartup(args: {
 +  requested: boolean | undefined
@@ -1156,6 +1224,22 @@ index 0000000000000000000000000000000000000000..e4968870dbd86dcf85309a828acb0faf
 +      agentArgs: normalizedAgentArgs,
 +      shell,
 +      promptInjectionMode: 'flag-prompt'
++    }
++  }
++  const lastCursorToken = tokenized.tokens.at(-1)
++  if (
++    lastCursorToken?.startsWith('-') &&
++    !CURSOR_TERMINAL_BOOLEAN_OPTIONS.has(optionName(lastCursorToken))
++  ) {
++    // Why: appending --print after an option that still needs a value makes
++    // Cursor consume --print as that value and starts an interactive process
++    // under process-exit authority. Unknown trailing options therefore fall
++    // back to agent-status rather than risking a six-hour stranded run.
++    return {
++      enabled: false,
++      agentArgs: args.agentArgs,
++      shell: fallbackShell,
++      promptInjectionMode: undefined
 +    }
 +  }
 +  // Always append a final native print flag. A print-looking token may actually be
@@ -1248,6 +1332,20 @@ index 0000000000000000000000000000000000000000..e4968870dbd86dcf85309a828acb0faf
 +    completionAuthority: applyAutomationOneShotCommand(plan, oneShot)
 +  }
 +}
+diff --git a/src/renderer/src/lib/automation-session-observer.ts b/src/renderer/src/lib/automation-session-observer.ts
+index a953652fefae4387a1d490b07fc5784c5da56a39..3f3fdab37366c2b2e948bb5fc407f86157782067 100644
+--- a/src/renderer/src/lib/automation-session-observer.ts
++++ b/src/renderer/src/lib/automation-session-observer.ts
+@@ -15,0 +16 @@ import { rendererAgentStatusObservations } from '@/lib/renderer-agent-status-obs
++import type { TerminalExitCause } from '../../../shared/terminal-exit-cause'
+@@ -23 +24 @@ export async function observeExistingAutomationSession(args: {
+-  onExit: (code: number) => void
++  onExit: (code: number, exitCause?: TerminalExitCause) => void
+@@ -107 +108,3 @@ export async function observeExistingAutomationSession(args: {
+-  const unsubscribeExit = subscribeToPtyExit(ptyId, onExit)
++  const unsubscribeExit = subscribeToPtyExit(ptyId, (code, context) =>
++    onExit(code, context.exitCause)
++  )
 diff --git a/src/renderer/src/lib/launch-agent-background-session.test.ts b/src/renderer/src/lib/launch-agent-background-session.test.ts
 index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3c0b532c7 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.test.ts
@@ -1307,7 +1405,7 @@ index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3
 +  })
 +
 diff --git a/src/renderer/src/lib/launch-agent-background-session.ts b/src/renderer/src/lib/launch-agent-background-session.ts
-index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..931b4acce61f42aa43ea37e0bf8acba4d3a937f3 100644
+index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..5b57858e3dd171868cb51474ad011e2147f06bf7 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.ts
 +++ b/src/renderer/src/lib/launch-agent-background-session.ts
 @@ -2 +1,0 @@ import { useAppStore } from '@/store'
@@ -1316,14 +1414,16 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..931b4acce61f42aa43ea37e0bf8acba4
 +import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
 @@ -34 +33,0 @@ import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-p
 -import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
-@@ -56 +55 @@ export async function launchAgentBackgroundSession(
+@@ -42,0 +42 @@ import { isWslUncPath } from '../../../shared/wsl-paths'
++import type { TerminalExitCause } from '../../../shared/terminal-exit-cause'
+@@ -56 +56 @@ export async function launchAgentBackgroundSession(
 -  const agentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
 +  const defaultAgentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
-@@ -64,0 +64,3 @@ export async function launchAgentBackgroundSession(
+@@ -64,0 +65,3 @@ export async function launchAgentBackgroundSession(
 +  const runtimeTarget = getActiveRuntimeTarget(
 +    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 +  )
-@@ -77,12 +79 @@ export async function launchAgentBackgroundSession(
+@@ -77,12 +80 @@ export async function launchAgentBackgroundSession(
 -  const { platform: launchPlatform, isRemote } = launchHost
 -  const startupShell = resolveLocalWindowsAgentStartupShell({
 -    platform: launchPlatform,
@@ -1337,13 +1437,13 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..931b4acce61f42aa43ea37e0bf8acba4
 -  const pasteDraftAfterLaunch = hasPrompt && isFollowupPath ? trimmedPrompt : null
 -  const startupPlan = buildAgentStartupPlan({
 +  const startup = buildAutomationBackgroundStartup({
-@@ -90 +81 @@ export async function launchAgentBackgroundSession(
+@@ -90 +82 @@ export async function launchAgentBackgroundSession(
 -    prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',
 +    prompt,
-@@ -92 +83 @@ export async function launchAgentBackgroundSession(
+@@ -92 +84 @@ export async function launchAgentBackgroundSession(
 -    agentArgs,
 +    agentArgs: defaultAgentArgs,
-@@ -94,4 +85,5 @@ export async function launchAgentBackgroundSession(
+@@ -94,4 +86,5 @@ export async function launchAgentBackgroundSession(
 -    platform: launchPlatform,
 -    shell: startupShell,
 -    isRemote,
@@ -1353,59 +1453,55 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..931b4acce61f42aa43ea37e0bf8acba4
 +    worktreePath: worktree.path,
 +    terminalWindowsShell: store.settings?.terminalWindowsShell,
 +    oneShotRequested: args.oneShot
-@@ -99 +91 @@ export async function launchAgentBackgroundSession(
+@@ -99 +92 @@ export async function launchAgentBackgroundSession(
 -  if (!startupPlan) {
 +  if (!startup) {
-@@ -101,0 +94 @@ export async function launchAgentBackgroundSession(
+@@ -101,0 +95 @@ export async function launchAgentBackgroundSession(
 +  const startupPlan = startup.plan
-@@ -124,4 +116,0 @@ export async function launchAgentBackgroundSession(
+@@ -124,4 +117,0 @@ export async function launchAgentBackgroundSession(
 -  // Route by the worktree's owner host, not the focused runtime.
 -  const runtimeTarget = getActiveRuntimeTarget(
 -    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 -  )
-@@ -139 +128,5 @@ export async function launchAgentBackgroundSession(
+@@ -139 +129 @@ export async function launchAgentBackgroundSession(
 -  const handleExit = (exitPtyId: string, code: number): void => {
-+  const handleExit = (
-+    exitPtyId: string,
-+    code: number,
-+    exitCause?: import('../../../shared/terminal-exit-cause').TerminalExitCause
-+  ): void => {
-@@ -151 +144,5 @@ export async function launchAgentBackgroundSession(
++  const handleExit = (exitPtyId: string, code: number, exitCause?: TerminalExitCause): void => {
+@@ -151 +141,5 @@ export async function launchAgentBackgroundSession(
 -    onExit?.(exitPtyId, code)
 +    if (exitCause) {
 +      onExit?.(exitPtyId, code, exitCause)
 +    } else {
 +      onExit?.(exitPtyId, code)
 +    }
-@@ -184 +181,3 @@ export async function launchAgentBackgroundSession(
+@@ -184 +178,3 @@ export async function launchAgentBackgroundSession(
 -        ...(hasPrompt && !isFollowupPath ? { prompt: trimmedPrompt } : {}),
 +        ...(startup.hasPrompt && !startup.isFollowupPath && !startup.oneShot.enabled
 +          ? { prompt: startup.trimmedPrompt }
 +          : {}),
-@@ -249 +248 @@ export async function launchAgentBackgroundSession(
+@@ -249 +245 @@ export async function launchAgentBackgroundSession(
 -    if (agent === 'command-code' && hasPrompt && !isFollowupPath) {
 +    if (agent === 'command-code' && startup.hasPrompt && !startup.isFollowupPath) {
-@@ -257 +256 @@ export async function launchAgentBackgroundSession(
+@@ -257 +253 @@ export async function launchAgentBackgroundSession(
 -          { state: 'working', prompt: trimmedPrompt, agentType: agent, observation },
 +          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent, observation },
-@@ -287 +286,5 @@ export async function launchAgentBackgroundSession(
+@@ -287 +283,5 @@ export async function launchAgentBackgroundSession(
 -      eagerPtyBuffer = registerEagerPtyBuffer(ptyId, handleExit, spawned.incarnationId)
 +      eagerPtyBuffer = registerEagerPtyBuffer(
 +        ptyId,
 +        (exitPtyId, code, context) => handleExit(exitPtyId, code, context?.exitCause),
 +        spawned.incarnationId
 +      )
-@@ -292 +295,3 @@ export async function launchAgentBackgroundSession(
+@@ -292 +292,3 @@ export async function launchAgentBackgroundSession(
 -      unsubscribeExit = subscribeToPtyExit(ptyId, (code) => handleExit(ptyId, code))
 +      unsubscribeExit = subscribeToPtyExit(ptyId, (code, context) =>
 +        handleExit(ptyId, code, context?.exitCause)
 +      )
-@@ -300,2 +305,2 @@ export async function launchAgentBackgroundSession(
+@@ -300,2 +302,2 @@ export async function launchAgentBackgroundSession(
 -    if (pasteDraftAfterLaunch !== null) {
 -      scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
 +    if (startup.pasteDraftAfterLaunch !== null) {
 +      scheduleAgentBackgroundDraft(tab.id, startup.pasteDraftAfterLaunch, agent)
-@@ -304 +309,8 @@ export async function launchAgentBackgroundSession(
+@@ -304 +306,8 @@ export async function launchAgentBackgroundSession(
 -    return { tabId: tab.id, paneKey, ptyId, startupPlan, terminalOwnership }
 +    return {
 +      tabId: tab.id,
