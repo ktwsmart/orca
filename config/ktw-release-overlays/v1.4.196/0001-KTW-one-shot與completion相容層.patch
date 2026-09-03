@@ -395,7 +395,7 @@ index 0dc6750e8de167a50c4152a884f13d41908603cb..5c6eac0aff866f1c8e8c54687030f04d
 +        ? await observeProcessExit(runtime, handle, signal)
 +        : await observeAgentStatusCompletion(runtime, handle, signal)
 diff --git a/src/main/ipc/pty-runtime-kill-and-exit.test.ts b/src/main/ipc/pty-runtime-kill-and-exit.test.ts
-index 2200b2b6043d5b1102819d83de7c167b3f79ddaf..3b29419acea1630d4502a88abd02f28eab260a82 100644
+index 2200b2b6043d5b1102819d83de7c167b3f79ddaf..7682294420a068649e45d0a47f8d3d27da522033 100644
 --- a/src/main/ipc/pty-runtime-kill-and-exit.test.ts
 +++ b/src/main/ipc/pty-runtime-kill-and-exit.test.ts
 @@ -248,2 +248,4 @@ describe('registerPtyHandlers', () => {
@@ -432,6 +432,13 @@ index 2200b2b6043d5b1102819d83de7c167b3f79ddaf..3b29419acea1630d4502a88abd02f28e
 @@ -294 +305 @@ describe('registerPtyHandlers', () => {
 -      [['pty:exit', { id: 'local-pty', code: 0 }]]
 +      [['pty:exit', { id: 'local-pty', code: 0, exitCause: { kind: 'operator_close' } }]]
+@@ -485 +496 @@ describe('registerPtyHandlers', () => {
+-      onPtyExit: vi.fn(),
++      onPtyExit: vi.fn(() => ({ kind: 'operator_close' as const })),
+@@ -539 +550,2 @@ describe('registerPtyHandlers', () => {
+-        code: 0
++        code: 0,
++        exitCause: { kind: 'operator_close' }
 diff --git a/src/main/ipc/pty/delivery/exit.ts b/src/main/ipc/pty/delivery/exit.ts
 index 3825be5119272836b43b8ec2d1f95bc428aa458f..94b0a04c7e27469d4fbadf9c129a5319ed3599a4 100644
 --- a/src/main/ipc/pty/delivery/exit.ts
@@ -458,17 +465,29 @@ index ecdde7088f9e628b1ca2515fe1588a1a86859a1b..edc428479d429864d72319da4e244cb1
 -  sendPtyExitToRenderer: (payload: { id: string; code: number; incarnationId?: string }) => void
 +  sendPtyExitToRenderer: (payload: RendererPtyExitPayload) => void
 diff --git a/src/main/ipc/pty/provider/bind-listeners.ts b/src/main/ipc/pty/provider/bind-listeners.ts
-index 8febd1e3534fcf38a7c0af396fe0aa18b234614d..d3a98afedf607a29c621266bb532cdedf29d9149 100644
+index 8febd1e3534fcf38a7c0af396fe0aa18b234614d..d9ff8ddbb78e5aeaa9c962d546b141f6673c654f 100644
 --- a/src/main/ipc/pty/provider/bind-listeners.ts
 +++ b/src/main/ipc/pty/provider/bind-listeners.ts
-@@ -102,2 +101,0 @@ export function bindProviderListeners(session: PtyIpcSession): void {
+@@ -92,0 +93 @@ export function bindProviderListeners(session: PtyIpcSession): void {
++      let exitCause = payload.cause
+@@ -97,4 +98,5 @@ export function bindProviderListeners(session: PtyIpcSession): void {
+-        session.runtime?.onPtyExit(payload.id, payload.code, payload.incarnationId, {
+-          providerExitObserved: true,
+-          ...(payload.cause ? { cause: payload.cause } : {})
+-        })
++        exitCause =
++          session.runtime?.onPtyExit(payload.id, payload.code, payload.incarnationId, {
++            providerExitObserved: true,
++            ...(payload.cause ? { cause: payload.cause } : {})
++          }) ?? payload.cause
+@@ -102,2 +103,0 @@ export function bindProviderListeners(session: PtyIpcSession): void {
 -      // Why not the whole payload: the exit cause is a main-process fact for the
 -      // runtime's records; the renderer's pty:exit contract stays as it was.
-@@ -106,0 +105,4 @@ export function bindProviderListeners(session: PtyIpcSession): void {
+@@ -106,0 +107,4 @@ export function bindProviderListeners(session: PtyIpcSession): void {
 +        // Why: local providers derive this from node-pty's signal + trusted
 +        // child-status boundary. Remote/legacy providers omit it and renderer
 +        // one-shot completion fails closed instead of guessing from code 0.
-+        ...(payload.cause ? { exitCause: payload.cause } : {}),
++        ...(exitCause ? { exitCause } : {}),
 diff --git a/src/main/ipc/pty/provider/local-configure.ts b/src/main/ipc/pty/provider/local-configure.ts
 index 1ebf0248e12758d159404301cfa6676fccc256de..b34e8674c8c0f77af4abf676c50d522b07c73e05 100644
 --- a/src/main/ipc/pty/provider/local-configure.ts
@@ -568,6 +587,44 @@ index a5991581f82f941d6651fb07d9ad81b7b3855443..3837d2ff2c91503cdcedb0864abb5da6
 @@ -150 +153 @@ export function activateLocalPtySession(args: {
 -      cb({ id, code: exitCode, incarnationId, cause })
 +      cb({ id, code: exitCode, incarnationId, cause: reportedCause })
+diff --git a/src/main/providers/macos-tcc-login-shell.test.ts b/src/main/providers/macos-tcc-login-shell.test.ts
+index ad29faf376e19b5f13458bf3bb3749d7e8b2eeb5..98997cdceda00e01e777b76a384c93ee8834844e 100644
+--- a/src/main/providers/macos-tcc-login-shell.test.ts
++++ b/src/main/providers/macos-tcc-login-shell.test.ts
+@@ -119,0 +120,15 @@ describe('wrapShellSpawnForMacosTccAttribution', () => {
++  it('uses a direct shell and consumes the one-shot child-status marker', async () => {
++    setPlatform('darwin')
++    await prepareMacosTccLoginShell()
++    const env = {
++      SHELL: '/bin/zsh',
++      ORCA_REQUIRE_CHILD_EXIT_STATUS: '1'
++    }
++
++    expect(wrapShellSpawnForMacosTccAttribution('/bin/zsh', ['-l'], env)).toEqual({
++      file: '/bin/zsh',
++      args: ['-l']
++    })
++    expect(env).toEqual({ SHELL: '/bin/zsh' })
++  })
++
+diff --git a/src/main/providers/macos-tcc-login-shell.ts b/src/main/providers/macos-tcc-login-shell.ts
+index 51c42e23a0ab58dc6631b1cb4eb6346c14a0fafb..36cd8b9b3b15077bb9a46d0302caacc2f56e78ec 100644
+--- a/src/main/providers/macos-tcc-login-shell.ts
++++ b/src/main/providers/macos-tcc-login-shell.ts
+@@ -4,0 +5 @@ import { basename } from 'node:path'
++import { REQUIRE_CHILD_EXIT_STATUS_ENV_VAR } from '../../shared/terminal-exit-cause'
+@@ -328,0 +330,11 @@ export function wrapShellSpawnForMacosTccAttribution(
++  // Automation one-shot completion needs the child process's real status. The
++  // login(1) TCC wrapper cannot forward it, so consume this exact per-spawn
++  // marker and use the direct shell boundary. Delete it before every return so
++  // the internal transport request is never inherited by the launched agent.
++  const requireChildExitStatus = env?.[REQUIRE_CHILD_EXIT_STATUS_ENV_VAR] === '1'
++  if (env && Object.hasOwn(env, REQUIRE_CHILD_EXIT_STATUS_ENV_VAR)) {
++    delete env[REQUIRE_CHILD_EXIT_STATUS_ENV_VAR]
++  }
++  if (requireChildExitStatus) {
++    return { file, args }
++  }
 diff --git a/src/main/runtime/orca-runtime-on-pty-exit.ts b/src/main/runtime/orca-runtime-on-pty-exit.ts
 index 07f8d4fbbd451f381599d5c3e69d849e6c7fa137..b62cf743876b5dee4f6b03c8c232aa14d7a9f173 100644
 --- a/src/main/runtime/orca-runtime-on-pty-exit.ts
@@ -995,10 +1052,10 @@ index 26145d313ddbe3eb0d00a3549e4745d125361d00..b54329c3947b01810ab7e6cef9359147
 +  completionAuthority: 'agent-status' | 'process-exit'
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.test.ts b/src/renderer/src/lib/automation-one-shot-startup.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0c404cdd93ab0bfeed3cdd8bcaf48c9163f5aa74
+index 0000000000000000000000000000000000000000..258f25c4b8db91841b7f25966349b8412a527be3
 --- /dev/null
 +++ b/src/renderer/src/lib/automation-one-shot-startup.test.ts
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,142 @@
 +import { describe, expect, it } from 'vitest'
 +import {
 +  applyAutomationOneShotCommand,
@@ -1072,6 +1129,20 @@ index 0000000000000000000000000000000000000000..0c404cdd93ab0bfeed3cdd8bcaf48c91
 +        agentArgs: '--prompt existing'
 +      }).enabled
 +    ).toBe(false)
++    expect(
++      planAutomationOneShotStartup({
++        ...base,
++        agent: 'antigravity',
++        agentArgs: '--model'
++      }).enabled
++    ).toBe(false)
++    expect(
++      planAutomationOneShotStartup({
++        ...base,
++        agent: 'antigravity',
++        agentArgs: '--dangerously-skip-permissions'
++      }).enabled
++    ).toBe(true)
 +  })
 +
 +  it.each([
@@ -1129,10 +1200,10 @@ index 0000000000000000000000000000000000000000..0c404cdd93ab0bfeed3cdd8bcaf48c91
 +})
 diff --git a/src/renderer/src/lib/automation-one-shot-startup.ts b/src/renderer/src/lib/automation-one-shot-startup.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..be57c169c9cfcd44f15fdc2666d06d28b690d5f2
+index 0000000000000000000000000000000000000000..b8831df34e71a48df48dcd0c2471025917cbb5df
 --- /dev/null
 +++ b/src/renderer/src/lib/automation-one-shot-startup.ts
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,208 @@
 +import { buildAgentStartupPlan, type AgentStartupPlan } from '@/lib/tui-agent-startup'
 +import type { AgentPromptInjectionMode } from '../../../shared/tui-agent-config'
 +import {
@@ -1156,6 +1227,18 @@ index 0000000000000000000000000000000000000000..be57c169c9cfcd44f15fdc2666d06d28
 +}
 +
 +const CURSOR_TERMINAL_BOOLEAN_OPTIONS = new Set(['--trust', '--force', '--yolo', '--print', '-p'])
++const ANTIGRAVITY_TERMINAL_BOOLEAN_OPTIONS = new Set(['--dangerously-skip-permissions'])
++
++function hasUnsafeTrailingOption(
++  tokens: readonly string[],
++  safeBooleanOptions: ReadonlySet<string>
++): boolean {
++  const lastToken = tokens.at(-1)
++  if (!lastToken?.startsWith('-')) {
++    return false
++  }
++  return !safeBooleanOptions.has(optionName(lastToken))
++}
 +
 +export function planAutomationOneShotStartup(args: {
 +  requested: boolean | undefined
@@ -1207,6 +1290,7 @@ index 0000000000000000000000000000000000000000..be57c169c9cfcd44f15fdc2666d06d28
 +  }
 +  if (args.agent === 'antigravity') {
 +    if (
++      hasUnsafeTrailingOption(tokenized.tokens, ANTIGRAVITY_TERMINAL_BOOLEAN_OPTIONS) ||
 +      tokenized.tokens.some((token) => {
 +        const name = optionName(token)
 +        return name === '-i' || name === '--prompt-interactive' || name === '--prompt'
@@ -1226,11 +1310,7 @@ index 0000000000000000000000000000000000000000..be57c169c9cfcd44f15fdc2666d06d28
 +      promptInjectionMode: 'flag-prompt'
 +    }
 +  }
-+  const lastCursorToken = tokenized.tokens.at(-1)
-+  if (
-+    lastCursorToken?.startsWith('-') &&
-+    !CURSOR_TERMINAL_BOOLEAN_OPTIONS.has(optionName(lastCursorToken))
-+  ) {
++  if (hasUnsafeTrailingOption(tokenized.tokens, CURSOR_TERMINAL_BOOLEAN_OPTIONS)) {
 +    // Why: appending --print after an option that still needs a value makes
 +    // Cursor consume --print as that value and starts an interactive process
 +    // under process-exit authority. Unknown trailing options therefore fall
@@ -1347,7 +1427,7 @@ index a953652fefae4387a1d490b07fc5784c5da56a39..3f3fdab37366c2b2e948bb5fc407f861
 +    onExit(code, context.exitCause)
 +  )
 diff --git a/src/renderer/src/lib/launch-agent-background-session.test.ts b/src/renderer/src/lib/launch-agent-background-session.test.ts
-index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3c0b532c7 100644
+index 42df8332882b9aa03dfb168d7e156aabe06c1135..72e504eac4072a070da4bef9e040d9591537a3e8 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.test.ts
 +++ b/src/renderer/src/lib/launch-agent-background-session.test.ts
 @@ -30,0 +31 @@ const mockGetAgentLaunchPlatformForRepo = vi.fn<() => NodeJS.Platform>()
@@ -1359,7 +1439,7 @@ index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3
 +
 @@ -71,0 +76 @@ describe('launchAgentBackgroundSession', () => {
 +    mockGetClientLoginShell.mockReturnValue('/bin/zsh')
-@@ -92,0 +98,44 @@ describe('launchAgentBackgroundSession', () => {
+@@ -92,0 +98,50 @@ describe('launchAgentBackgroundSession', () => {
 +  it('launches Antigravity automation as native one-shot and makes process exit authoritative', async () => {
 +    Object.assign(state.settings, {
 +      agentDefaultArgs: { antigravity: '--model claude-sonnet-4-6 --print-timeout 10m' }
@@ -1379,6 +1459,9 @@ index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3
 +    expect(command).toContain('--prompt')
 +    expect(command).toContain('run the audit')
 +    expect(command).toContain('orca_status=$?')
++    expect(mockSpawn.mock.calls[0]?.[0]?.env).toMatchObject({
++      ORCA_REQUIRE_CHILD_EXIT_STATUS: '1'
++    })
 +    expect(result?.completionAuthority).toBe('process-exit')
 +  })
 +
@@ -1401,11 +1484,16 @@ index 42df8332882b9aa03dfb168d7e156aabe06c1135..2cc27fc2a4272eecc6c588b6689d11e3
 +    expect(command).toContain('grok')
 +    expect(command).toContain('run the audit')
 +    expect(command.match(/--print/g)).toHaveLength(1)
++    expect(mockSpawn.mock.calls[0]?.[0]?.env).toMatchObject({
++      ORCA_REQUIRE_CHILD_EXIT_STATUS: '1'
++    })
 +    expect(result?.completionAuthority).toBe('process-exit')
 +  })
 +
+@@ -136,0 +192 @@ describe('launchAgentBackgroundSession', () => {
++    expect(mockSpawn.mock.calls[0]?.[0]?.env).not.toHaveProperty('ORCA_REQUIRE_CHILD_EXIT_STATUS')
 diff --git a/src/renderer/src/lib/launch-agent-background-session.ts b/src/renderer/src/lib/launch-agent-background-session.ts
-index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..5b57858e3dd171868cb51474ad011e2147f06bf7 100644
+index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..805d42106450e0d003abcfdbec8106c594c71691 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.ts
 +++ b/src/renderer/src/lib/launch-agent-background-session.ts
 @@ -2 +1,0 @@ import { useAppStore } from '@/store'
@@ -1414,16 +1502,19 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..5b57858e3dd171868cb51474ad011e21
 +import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
 @@ -34 +33,0 @@ import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-p
 -import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
-@@ -42,0 +42 @@ import { isWslUncPath } from '../../../shared/wsl-paths'
-+import type { TerminalExitCause } from '../../../shared/terminal-exit-cause'
-@@ -56 +56 @@ export async function launchAgentBackgroundSession(
+@@ -42,0 +42,4 @@ import { isWslUncPath } from '../../../shared/wsl-paths'
++import {
++  REQUIRE_CHILD_EXIT_STATUS_ENV_VAR,
++  type TerminalExitCause
++} from '../../../shared/terminal-exit-cause'
+@@ -56 +59 @@ export async function launchAgentBackgroundSession(
 -  const agentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
 +  const defaultAgentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
-@@ -64,0 +65,3 @@ export async function launchAgentBackgroundSession(
+@@ -64,0 +68,3 @@ export async function launchAgentBackgroundSession(
 +  const runtimeTarget = getActiveRuntimeTarget(
 +    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 +  )
-@@ -77,12 +80 @@ export async function launchAgentBackgroundSession(
+@@ -77,12 +83 @@ export async function launchAgentBackgroundSession(
 -  const { platform: launchPlatform, isRemote } = launchHost
 -  const startupShell = resolveLocalWindowsAgentStartupShell({
 -    platform: launchPlatform,
@@ -1437,13 +1528,13 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..5b57858e3dd171868cb51474ad011e21
 -  const pasteDraftAfterLaunch = hasPrompt && isFollowupPath ? trimmedPrompt : null
 -  const startupPlan = buildAgentStartupPlan({
 +  const startup = buildAutomationBackgroundStartup({
-@@ -90 +82 @@ export async function launchAgentBackgroundSession(
+@@ -90 +85 @@ export async function launchAgentBackgroundSession(
 -    prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',
 +    prompt,
-@@ -92 +84 @@ export async function launchAgentBackgroundSession(
+@@ -92 +87 @@ export async function launchAgentBackgroundSession(
 -    agentArgs,
 +    agentArgs: defaultAgentArgs,
-@@ -94,4 +86,5 @@ export async function launchAgentBackgroundSession(
+@@ -94,4 +89,5 @@ export async function launchAgentBackgroundSession(
 -    platform: launchPlatform,
 -    shell: startupShell,
 -    isRemote,
@@ -1453,55 +1544,62 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..5b57858e3dd171868cb51474ad011e21
 +    worktreePath: worktree.path,
 +    terminalWindowsShell: store.settings?.terminalWindowsShell,
 +    oneShotRequested: args.oneShot
-@@ -99 +92 @@ export async function launchAgentBackgroundSession(
+@@ -99 +95 @@ export async function launchAgentBackgroundSession(
 -  if (!startupPlan) {
 +  if (!startup) {
-@@ -101,0 +95 @@ export async function launchAgentBackgroundSession(
+@@ -101,0 +98 @@ export async function launchAgentBackgroundSession(
 +  const startupPlan = startup.plan
-@@ -124,4 +117,0 @@ export async function launchAgentBackgroundSession(
+@@ -111,0 +109,6 @@ export async function launchAgentBackgroundSession(
++  if (startup.completionAuthority === 'process-exit') {
++    // macOS's TCC login(1) wrapper reports its own status, not the agent's. This
++    // marker is consumed and removed by the process owner before spawn so the
++    // one-shot's real exit status remains verifiable without leaking the marker.
++    paneEnv[REQUIRE_CHILD_EXIT_STATUS_ENV_VAR] = '1'
++  }
+@@ -124,4 +126,0 @@ export async function launchAgentBackgroundSession(
 -  // Route by the worktree's owner host, not the focused runtime.
 -  const runtimeTarget = getActiveRuntimeTarget(
 -    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 -  )
-@@ -139 +129 @@ export async function launchAgentBackgroundSession(
+@@ -139 +138 @@ export async function launchAgentBackgroundSession(
 -  const handleExit = (exitPtyId: string, code: number): void => {
 +  const handleExit = (exitPtyId: string, code: number, exitCause?: TerminalExitCause): void => {
-@@ -151 +141,5 @@ export async function launchAgentBackgroundSession(
+@@ -151 +150,5 @@ export async function launchAgentBackgroundSession(
 -    onExit?.(exitPtyId, code)
 +    if (exitCause) {
 +      onExit?.(exitPtyId, code, exitCause)
 +    } else {
 +      onExit?.(exitPtyId, code)
 +    }
-@@ -184 +178,3 @@ export async function launchAgentBackgroundSession(
+@@ -184 +187,3 @@ export async function launchAgentBackgroundSession(
 -        ...(hasPrompt && !isFollowupPath ? { prompt: trimmedPrompt } : {}),
 +        ...(startup.hasPrompt && !startup.isFollowupPath && !startup.oneShot.enabled
 +          ? { prompt: startup.trimmedPrompt }
 +          : {}),
-@@ -249 +245 @@ export async function launchAgentBackgroundSession(
+@@ -249 +254 @@ export async function launchAgentBackgroundSession(
 -    if (agent === 'command-code' && hasPrompt && !isFollowupPath) {
 +    if (agent === 'command-code' && startup.hasPrompt && !startup.isFollowupPath) {
-@@ -257 +253 @@ export async function launchAgentBackgroundSession(
+@@ -257 +262 @@ export async function launchAgentBackgroundSession(
 -          { state: 'working', prompt: trimmedPrompt, agentType: agent, observation },
 +          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent, observation },
-@@ -287 +283,5 @@ export async function launchAgentBackgroundSession(
+@@ -287 +292,5 @@ export async function launchAgentBackgroundSession(
 -      eagerPtyBuffer = registerEagerPtyBuffer(ptyId, handleExit, spawned.incarnationId)
 +      eagerPtyBuffer = registerEagerPtyBuffer(
 +        ptyId,
 +        (exitPtyId, code, context) => handleExit(exitPtyId, code, context?.exitCause),
 +        spawned.incarnationId
 +      )
-@@ -292 +292,3 @@ export async function launchAgentBackgroundSession(
+@@ -292 +301,3 @@ export async function launchAgentBackgroundSession(
 -      unsubscribeExit = subscribeToPtyExit(ptyId, (code) => handleExit(ptyId, code))
 +      unsubscribeExit = subscribeToPtyExit(ptyId, (code, context) =>
 +        handleExit(ptyId, code, context?.exitCause)
 +      )
-@@ -300,2 +302,2 @@ export async function launchAgentBackgroundSession(
+@@ -300,2 +311,2 @@ export async function launchAgentBackgroundSession(
 -    if (pasteDraftAfterLaunch !== null) {
 -      scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
 +    if (startup.pasteDraftAfterLaunch !== null) {
 +      scheduleAgentBackgroundDraft(tab.id, startup.pasteDraftAfterLaunch, agent)
-@@ -304 +306,8 @@ export async function launchAgentBackgroundSession(
+@@ -304 +315,8 @@ export async function launchAgentBackgroundSession(
 -    return { tabId: tab.id, paneKey, ptyId, startupPlan, terminalOwnership }
 +    return {
 +      tabId: tab.id,
@@ -1524,6 +1622,18 @@ index 24d9345242d447288029f6a2f8cbab358d84eb85..df15fa61566f67981d4261e80f0b24dc
 +  completionAuthority?: AutomationRunCompletionAuthority
 @@ -239,0 +245,2 @@ export type AutomationDispatchResult = {
 +export type AutomationRunCompletionAuthority = 'agent-status' | 'process-exit'
++
+diff --git a/src/shared/terminal-exit-cause.ts b/src/shared/terminal-exit-cause.ts
+index 2e3ac7919c40b676afb441e3caa0860002c01906..6fdb3af8b75871d0721c27a78069e5700294ee0e 100644
+--- a/src/shared/terminal-exit-cause.ts
++++ b/src/shared/terminal-exit-cause.ts
+@@ -34,0 +35,7 @@ export type TerminalExitUnknownReason =
++/**
++ * Per-spawn, internal-only request for a host boundary that can vouch for the
++ * launched child's real exit status. The macOS TCC login wrapper consumes and
++ * removes this marker before spawning, so it never reaches the agent process.
++ */
++export const REQUIRE_CHILD_EXIT_STATUS_ENV_VAR = 'ORCA_REQUIRE_CHILD_EXIT_STATUS'
 +
 diff --git a/src/shared/tui-agent-startup.test.ts b/src/shared/tui-agent-startup.test.ts
 index e5e26f4680273d4c306e77bf04fa2d74482905e9..33213fe67cabd29e60f443e0f2e8a5e49df21afc 100644

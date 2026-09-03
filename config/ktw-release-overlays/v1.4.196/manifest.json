@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
   "name": "KTW Orca v1.4.196 one-shot 與 completion 相容層",
-  "generatedBy": "Codex 2026-09-03 14:21 +0800",
+  "generatedBy": "Codex 2026-09-03 14:50 +0800",
   "officialVersion": "1.4.196",
   "officialBaseSha": "aad4ae42ea5e555f25fdec679ebbcd18cc1e8911",
   "patchFile": "0001-KTW-one-shot與completion相容層.patch",
   "patchApplyMode": "unidiff-zero",
-  "patchSha256": "1988b7178f2ae635ba7031dfe9e9587e35b369aea9d90e35d6b3f65701c8fe4f",
-  "outputTreeSha": "9e124ca14fb0d4bb127172e6099dd0e016c50b49",
+  "patchSha256": "d861513fcd21d1a8b24ef714d96007201a467f12b4a06fa851914a351c48088f",
+  "outputTreeSha": "4a36d3fdcc24df51732e256ca344d46422c3f399",
   "sourceCommits": [
     "d2d981c424b4c3f10d1cedc7581cd8c8c53d0b03",
     "acf807102762fdc8420cad0080ca341a58d4d618",
@@ -35,6 +35,8 @@
     "src/main/persistence/scheduling-automations/automation-run-operations.ts",
     "src/main/providers/local-pty-provider-types.ts",
     "src/main/providers/local-pty-session-activation.ts",
+    "src/main/providers/macos-tcc-login-shell.test.ts",
+    "src/main/providers/macos-tcc-login-shell.ts",
     "src/main/runtime/orca-runtime-on-pty-exit.ts",
     "src/preload/api/pty-api.ts",
     "src/preload/api/pty-bridge-part-2.ts",
@@ -54,6 +56,7 @@
     "src/renderer/src/lib/launch-agent-background-session.test.ts",
     "src/renderer/src/lib/launch-agent-background-session.ts",
     "src/shared/automations-types.ts",
+    "src/shared/terminal-exit-cause.ts",
     "src/shared/tui-agent-startup.test.ts",
     "src/shared/tui-agent-startup.ts"
   ]
