@@ -25,7 +25,7 @@ const OVERLAYS = [
       'config/ktw-release-overlays/v1.4.196/0001-KTW-one-shot與completion相容層.patch',
     officialBaseSha: 'aad4ae42ea5e555f25fdec679ebbcd18cc1e8911',
     pathCount: 17,
-    outputTreeSha: '5788031985c5f610a86666a9d4073d0a306548b8'
+    outputTreeSha: 'ba255d46d4dfe87072cfad27d774868fdb468c10'
   }
 ].map((overlay) => ({
   ...overlay,
@@ -59,8 +59,9 @@ describe('KTW release overlay verifier', () => {
       expect([...preimages.values()].every((sha) => /^[0-9a-f]{40}$/.test(sha))).toBe(true)
     })
 
-    // Required static analysis fetches the official objects. Shallow unit shards
-    // still run all pure contract tests and skip only this duplicate materialization.
+    // Required static analysis fetches both exact official base commits before
+    // running both manifests. Shallow unit shards still run every pure contract
+    // test and skip only this duplicate local materialization when an object is absent.
     it.skipIf(!overlay.hasOfficialBase)(
       `materializes ${overlay.manifestPath} to its exact output tree`,
       () => {

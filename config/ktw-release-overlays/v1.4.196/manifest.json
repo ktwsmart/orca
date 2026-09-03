@@ -6,8 +6,8 @@
   "officialBaseSha": "aad4ae42ea5e555f25fdec679ebbcd18cc1e8911",
   "patchFile": "0001-KTW-one-shot與completion相容層.patch",
   "patchApplyMode": "unidiff-zero",
-  "patchSha256": "52ee38025fd7b7f509a3e399540cbd8937d2bc1bb3a535668b2843938a62af8e",
-  "outputTreeSha": "5788031985c5f610a86666a9d4073d0a306548b8",
+  "patchSha256": "41935b165e106e22f0a0d7b76fc245348b1d96f4d1adf44dda62b8be51268695",
+  "outputTreeSha": "ba255d46d4dfe87072cfad27d774868fdb468c10",
   "sourceCommits": [
     "d2d981c424b4c3f10d1cedc7581cd8c8c53d0b03",
     "acf807102762fdc8420cad0080ca341a58d4d618",

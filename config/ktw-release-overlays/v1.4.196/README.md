@@ -26,8 +26,10 @@ one-shot 啟動與 completion authority。
   `--prompt` 衝突參數；
 - Cursor 尾端固定加入原生 `--print`；
 - POSIX 以 `exec sh -c` 讓 agent process 擁有 PTY lifetime；
-- completion authority 固定為 `process-exit`，exit 0 才能 completed，非零、quota、
-  login、Trust 或沒有可驗 exit code 一律失敗；
+- completion authority 固定為 `process-exit`；只有 host 回報
+  `TerminalExitCause.kind=exited` 且 cause 內的 exit code 為 0 才能 completed。
+  operator close、signal、unknown、非零、quota、login、Trust 或沒有可驗 exit cause
+  一律失敗；
 - early `done` 在 launch plan 尚未回傳時只作 pending evidence；若最終 authority 是
   process-exit，該 pending done 必須丟棄，避免 race 假完成；
 - reuse／remote／不安全 shell 維持官方 agent-status 行為，fail closed 不強行 one-shot。
@@ -35,7 +37,9 @@ one-shot 啟動與 completion authority。
 ## 驗證契約
 
 `manifest.json` 綁定官方 base、17 個允許路徑、zero-context full-index patch SHA-256
-與完整 output tree SHA。驗證器使用 temporary Git index，不修改目前工作樹：
+與完整 output tree SHA。required static-analysis 會先從官方 upstream 精確抓取
+v1.4.192／v1.4.196 兩個 base commit，再逐份物化驗證；驗證器使用 temporary Git
+index，不修改目前工作樹：
 
 ```bash
 node config/scripts/verify-ktw-release-overlay.mjs \
@@ -46,7 +50,7 @@ node config/scripts/verify-ktw-release-overlay.mjs \
 149 項，加上官方 retained-PTY hydration／swap 2 個測試檔 35 項（large inventory
 fixture 為 150,000 sessions，涵蓋本機 32-session 規模）、typecheck、`build:unpack`。
 打包候選 app.asar SHA-256 為
-`3603089e38f809fc7e96cb3d6a053a86dc34f22e4409fec6204cd25a44888204`。
+`dfc5f1fec59145d7d0454e7b892349505a8f06e58d735b6c95d55c2d5ade5a83`。
 
 recipe 本身不安裝 App、不停止 daemon，也不讀寫 credential。正式換版仍須另案 Slack
 核准，並以 preinstall 全部 `ptyId + incarnationId` 的 N/N continuity、原 daemon PID

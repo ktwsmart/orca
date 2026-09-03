@@ -66,7 +66,7 @@ index 4ac125082fbf5de992aeb6d4076b4a9387f8616d..21e5eb34493e3a251b97a9885bc3f635
 +        completionAuthority: run.completionAuthority ?? 'agent-status'
 +      })
 diff --git a/src/main/automations/runtime-terminal-run-observer.test.ts b/src/main/automations/runtime-terminal-run-observer.test.ts
-index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec8ee86a19 100644
+index a9b307c32984acb59d38aea21fffde4fb08df200..025832490febcf22988e753826a699c73980ab64 100644
 --- a/src/main/automations/runtime-terminal-run-observer.test.ts
 +++ b/src/main/automations/runtime-terminal-run-observer.test.ts
 @@ -89 +89,4 @@ function observe(runtime: AutomationRunTerminalHost) {
@@ -75,10 +75,15 @@ index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec
 +      signal: controller.signal,
 +      completionAuthority: 'agent-status'
 +    })
-@@ -125,0 +129,106 @@ describe('createRuntimeAutomationRunTerminalObserver', () => {
+@@ -125,0 +129,160 @@ describe('createRuntimeAutomationRunTerminalObserver', () => {
 +  it('keeps a one-shot run open until its process exits with code zero', async () => {
 +    let resolveExit:
-+      | ((value: { satisfied: boolean; status: string; exitCode: number | null }) => void)
++      | ((value: {
++          satisfied: boolean
++          status: string
++          exitCode: number | null
++          exitCause: { kind: 'exited'; exitCode: number }
++        }) => void)
 +      | null = null
 +    const runtime: AutomationRunTerminalHost = {
 +      getTerminalHandleForPaneKey: () => HANDLE,
@@ -103,7 +108,12 @@ index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec
 +    await Promise.resolve()
 +    expect(settled).toBe(false)
 +
-+    resolveExit!({ satisfied: true, status: 'exited', exitCode: 0 })
++    resolveExit!({
++      satisfied: true,
++      status: 'exited',
++      exitCode: 0,
++      exitCause: { kind: 'exited', exitCode: 0 }
++    })
 +    await expect(promise).resolves.toMatchObject({ status: 'completed', error: null })
 +  })
 +
@@ -113,7 +123,12 @@ index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec
 +      readTerminal: async () => ({ tail: ['quota reached'] }),
 +      waitForTerminal: async (_handle, options) => {
 +        expect(options?.condition).toBe('exit')
-+        return { satisfied: true, status: 'exited', exitCode: 9 }
++        return {
++          satisfied: true,
++          status: 'exited',
++          exitCode: 9,
++          exitCause: { kind: 'exited' as const, exitCode: 9 }
++        }
 +      }
 +    }
 +    const controller = new AbortController()
@@ -126,11 +141,11 @@ index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec
 +    expect(result.outputSnapshot?.content).toContain('quota reached')
 +  })
 +
-+  it('fails closed when a one-shot exit has no verified exit code', async () => {
++  it('fails closed when a one-shot exit has no verified exit cause', async () => {
 +    const runtime: AutomationRunTerminalHost = {
 +      getTerminalHandleForPaneKey: () => HANDLE,
 +      readTerminal: async () => ({ tail: ['transport disappeared'] }),
-+      waitForTerminal: async () => ({ satisfied: true, status: 'exited', exitCode: null })
++      waitForTerminal: async () => ({ satisfied: true, status: 'exited', exitCode: 0 })
 +    }
 +    const controller = new AbortController()
 +    const result = await createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(
@@ -138,7 +153,46 @@ index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec
 +      { signal: controller.signal, completionAuthority: 'process-exit' }
 +    )
 +    expect(result.status).toBe('dispatch_failed')
-+    expect(result.error).toContain('without a verified exit code')
++    expect(result.error).toContain('without a verified exit cause')
++  })
++
++  it.each([
++    {
++      label: 'operator close',
++      exitCause: { kind: 'operator_close' as const },
++      message: 'closed by operator'
++    },
++    {
++      label: 'signal',
++      exitCause: { kind: 'signaled' as const, signal: 9 },
++      message: 'killed by signal 9'
++    },
++    {
++      label: 'unreported cause',
++      exitCause: { kind: 'unknown' as const, reason: 'cause_unreported' as const },
++      message: 'did not say why'
++    }
++  ])('fails a one-shot run on $label even when the legacy exit code is zero', async ({
++    exitCause,
++    message
++  }) => {
++    const runtime: AutomationRunTerminalHost = {
++      getTerminalHandleForPaneKey: () => HANDLE,
++      readTerminal: async () => ({ tail: ['process ended'] }),
++      waitForTerminal: async () => ({
++        satisfied: true,
++        status: 'exited',
++        exitCode: 0,
++        exitCause
++      })
++    }
++    const controller = new AbortController()
++    const result = await createRuntimeAutomationRunTerminalObserver(runtime).observeCompletion(
++      HANDLE,
++      { signal: controller.signal, completionAuthority: 'process-exit' }
++    )
++    expect(result.status).toBe('dispatch_failed')
++    expect(result.error).toContain(message)
 +  })
 +
 +  it('fails truthfully after the one-shot process exit deadline', async () => {
@@ -183,10 +237,15 @@ index a9b307c32984acb59d38aea21fffde4fb08df200..b363b0a485abc63bd4fc7eee1afe74ec
 +  })
 +
 diff --git a/src/main/automations/runtime-terminal-run-observer.ts b/src/main/automations/runtime-terminal-run-observer.ts
-index 0dc6750e8de167a50c4152a884f13d41908603cb..e726a063ab383f1eace808ec4f49984528dd675e 100644
+index 0dc6750e8de167a50c4152a884f13d41908603cb..5c6eac0aff866f1c8e8c54687030f04d00b5ddd5 100644
 --- a/src/main/automations/runtime-terminal-run-observer.ts
 +++ b/src/main/automations/runtime-terminal-run-observer.ts
-@@ -32,2 +32,7 @@ export type AutomationRunTerminalHost = {
+@@ -6,0 +7,4 @@ import type { AutomationRunOutputSnapshot } from '../../shared/automations-types
++import {
++  describeTerminalExitCause,
++  type TerminalExitCause
++} from '../../shared/terminal-exit-cause'
+@@ -32,2 +36,8 @@ export type AutomationRunTerminalHost = {
 -    options?: { condition?: 'tui-idle'; timeoutMs?: number; signal?: AbortSignal }
 -  ): Promise<{ satisfied: boolean; blockedReason?: string }>
 +    options?: { condition?: 'exit' | 'tui-idle'; timeoutMs?: number; signal?: AbortSignal }
@@ -194,9 +253,10 @@ index 0dc6750e8de167a50c4152a884f13d41908603cb..e726a063ab383f1eace808ec4f499845
 +    satisfied: boolean
 +    status?: string
 +    exitCode?: number | null
++    exitCause?: TerminalExitCause
 +    blockedReason?: string
 +  }>
-@@ -147,0 +153,85 @@ async function buildUnobservedObservation(
+@@ -147,0 +158,90 @@ async function buildUnobservedObservation(
 +async function observeProcessExit(
 +  runtime: AutomationRunTerminalHost,
 +  handle: string,
@@ -220,17 +280,22 @@ index 0dc6750e8de167a50c4152a884f13d41908603cb..e726a063ab383f1eace808ec4f499845
 +    )
 +  }
 +  const outputSnapshot = await readTerminalSnapshot(runtime, handle)
-+  if (wait.satisfied && wait.exitCode === 0) {
++  if (
++    wait.satisfied &&
++    wait.exitCause?.kind === 'exited' &&
++    wait.exitCause.exitCode === 0
++  ) {
 +    return { status: 'completed', outputSnapshot, error: null }
 +  }
-+  const detail =
-+    typeof wait.exitCode === 'number'
-+      ? ` with code ${wait.exitCode}`
-+      : ' without a verified exit code'
++  const detail = wait.exitCause
++    ? `: ${describeTerminalExitCause(wait.exitCause)}`
++    : typeof wait.exitCode === 'number'
++      ? ` without a verified exit cause (reported code ${wait.exitCode})`
++      : ' without a verified exit cause or exit code'
 +  return {
 +    status: 'dispatch_failed',
 +    outputSnapshot,
-+    error: `Automation one-shot process exited${detail}.`
++    error: `Automation one-shot process ended${detail}.`
 +  }
 +}
 +
@@ -282,7 +347,7 @@ index 0dc6750e8de167a50c4152a884f13d41908603cb..e726a063ab383f1eace808ec4f499845
 +  }
 +}
 +
-@@ -154,42 +244,4 @@ export function createRuntimeAutomationRunTerminalObserver(
+@@ -154,42 +254,4 @@ export function createRuntimeAutomationRunTerminalObserver(
 -    observeCompletion: async (handle, { signal }) => {
 -      const startedAt = Date.now()
 -      // Why: tui-idle is level-triggered, so a reused pane still idle from the
