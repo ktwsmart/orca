@@ -573,8 +573,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Why fetch-depth 0: the harness extracts the newest release tag to skew
-      # current code against it. The default shallow clone has no tags, which is
+      # Why fetch-depth 0: the harness extracts the newest stable release that is
+      # an ancestor of this head. The default shallow clone has no tags, which is
       # why this cannot ride along in the sharded `test` job.
       - name: Checkout
         uses: actions/checkout@v6
@@ -595,11 +595,26 @@ jobs:
           git fetch --filter=blob:none https://github.com/stablyai/orca.git
           '+refs/tags/v*:refs/tags/v*'
 
+      - name: Resolve the newest stable release behind this head
+        id: cross-version-baseline
+        shell: bash
+        run: |
+          baseline="$(
+            git tag --merged HEAD --list 'v[0-9]*' |
+              grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+              sort -V |
+              tail -n 1
+          )"
+          test -n "$baseline"
+          echo "ref=$baseline" >> "$GITHUB_OUTPUT"
+
       # A path filter that matches nothing exits 1 ("No test files found"), so this
       # lane cannot report success while running zero tests. These suites share
       # real release checkout/dependency directories, so run files serially; file
       # parallelism can expose a half-materialized checkout to a sibling worker.
       - name: Old/new client and server compatibility journeys
+        env:
+          ORCA_CROSS_VERSION_BASELINE_REF: ${{ steps.cross-version-baseline.outputs.ref }}
         run: >-
           pnpm exec vitest run --config config/vitest.config.ts --no-file-parallelism
           tests/e2e/cross-version-wire/release-checkout.unit.test.ts
