@@ -910,8 +910,278 @@ index 6df1a64fb58c26d43644756b9e2f5b4727313de7..d0eb7da0baeb1d4d75434b80d0acc974
 +    completion.setCompletionAuthority(freshCompletionAuthority)
 @@ -205,0 +211 @@ export async function handleAutomationDispatchRequest({
 +        completionAuthority: freshCompletionAuthority,
+diff --git a/src/renderer/src/hooks/useAutomationDispatchEvents.one-shot.test.ts b/src/renderer/src/hooks/useAutomationDispatchEvents.one-shot.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e058c500e33d8b3b943106fdf007c3696822ab7a
+--- /dev/null
++++ b/src/renderer/src/hooks/useAutomationDispatchEvents.one-shot.test.ts
+@@ -0,0 +1,264 @@
++import type * as ReactModule from 'react'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++const mockLaunchAgentBackgroundSession = vi.fn()
++const mockLaunchWorktreeBackgroundTerminals = vi.fn()
++const mockFindReusableAutomationSession = vi.fn()
++const mockObserveExistingAutomationSession = vi.fn()
++const mockSubmitPromptToAgentPty = vi.fn()
++const mockCreateWorktree = vi.fn()
++const mockMarkDispatchResult = vi.fn()
++const mockOnDispatchRequested = vi.fn()
++const mockRendererReady = vi.fn()
++const mockFinalizeTerminalOwnership = vi.fn()
++const mockReleaseTerminalOwnership = vi.fn()
++const mockSshNeedsPassphrasePrompt = vi.fn()
++const mockSshGetState = vi.fn()
++const mockSshConnect = vi.fn()
++
++const setupLaunch = {
++  runnerScriptPath: '/tmp/setup.sh',
++  envVars: { ORCA_WORKTREE_PATH: '/repo/worktree' }
++}
++const createdWorktree = {
++  id: 'wt-created',
++  repoId: 'repo-1',
++  displayName: 'Automation worktree',
++  path: '/repo/worktree'
++}
++
++const state = {
++  activeView: 'terminal' as const,
++  activeWorktreeId: 'wt-active',
++  activeTabId: 'tab-active',
++  activeTabType: 'terminal' as const,
++  repos: [{ id: 'repo-1', connectionId: null, executionHostId: null, path: '/repo' }],
++  folderWorkspaces: [],
++  projectGroups: [],
++  worktreesByRepo: {},
++  detectedWorktreesByRepo: {},
++  agentStatusByPaneKey: {},
++  allWorktrees: vi.fn(() => []),
++  getKnownWorktreeById: vi.fn(() => undefined),
++  createWorktree: mockCreateWorktree,
++  subscribe: vi.fn(() => () => {}),
++  setActiveView: vi.fn(),
++  setActiveWorktree: vi.fn(),
++  setActiveTab: vi.fn(),
++  setActiveTabType: vi.fn()
++}
++
++function makeAutomation() {
++  return {
++    id: 'automation-1',
++    projectId: 'repo-1',
++    prompt: 'run this',
++    precheck: null,
++    agentId: 'claude',
++    workspaceMode: 'new_per_run',
++    workspaceId: null,
++    baseBranch: null,
++    setupDecision: 'run',
++    reuseSession: false
++  }
++}
++
++function makeRun() {
++  return {
++    id: 'run-1',
++    automationId: 'automation-1',
++    title: 'Nightly setup run',
++    scheduledFor: Date.parse('2026-06-24T03:00:00Z'),
++    trigger: 'scheduled',
++    workspaceId: null,
++    workspaceDisplayName: null
++  }
++}
++
++async function registerAndDispatch(): Promise<void> {
++  vi.doMock('react', async () => {
++    const actual = await vi.importActual<typeof ReactModule>('react')
++    return {
++      ...actual,
++      useEffect: (effect: () => void | (() => void)) => {
++        effect()
++      }
++    }
++  })
++  const { useAutomationDispatchEvents: registerAutomationDispatchEvents } =
++    await import('./useAutomationDispatchEvents')
++  registerAutomationDispatchEvents()
++  const handler = mockOnDispatchRequested.mock.calls[0]?.[0]
++  if (!handler) {
++    throw new Error('dispatch handler was not registered')
++  }
++  await handler({
++    automation: makeAutomation(),
++    run: makeRun(),
++    dispatchToken: 'dispatch-token'
++  })
++}
++
++vi.mock('@/lib/launch-agent-background-session', () => ({
++  launchAgentBackgroundSession: mockLaunchAgentBackgroundSession
++}))
++vi.mock('@/lib/launch-worktree-background-terminals', () => ({
++  launchWorktreeBackgroundTerminals: mockLaunchWorktreeBackgroundTerminals
++}))
++vi.mock('@/lib/agent-paste-draft', () => ({
++  submitPromptToAgentPty: mockSubmitPromptToAgentPty
++}))
++vi.mock('@/components/automations/automation-host-client', () => ({
++  listAutomationRunsForTarget: vi.fn().mockResolvedValue([])
++}))
++vi.mock('@/lib/automation-session-reuse', () => ({
++  findReusableAutomationSession: mockFindReusableAutomationSession
++}))
++vi.mock('@/lib/automation-session-observer', () => ({
++  observeExistingAutomationSession: mockObserveExistingAutomationSession
++}))
++vi.mock('@/components/automations/automation-run-output-snapshot', () => ({
++  createAutomationRunOutputSnapshotBuffer: () => ({
++    append: vi.fn(),
++    snapshot: () => null
++  }),
++  selectAutomationRunOutputSnapshot: (
++    assistantMessage: string | null | undefined,
++    terminalSnapshot: unknown
++  ) =>
++    assistantMessage
++      ? { format: 'plain_text', content: assistantMessage, capturedAt: 1, truncated: false }
++      : terminalSnapshot
++}))
++vi.mock('@/i18n/i18n', () => ({
++  translate: (_key: string, fallback: string) => fallback
++}))
++vi.mock('@/lib/browser-uuid', () => ({ createBrowserUuid: () => 'create-request-id' }))
++vi.mock('@/store', () => ({
++  useAppStore: {
++    getState: () => state,
++    subscribe: vi.fn(() => () => {})
++  }
++}))
++
++describe('useAutomationDispatchEvents one-shot completion authority', () => {
++  beforeEach(() => {
++    vi.resetModules()
++    vi.unstubAllGlobals()
++    vi.clearAllMocks()
++    mockCreateWorktree.mockResolvedValue({ worktree: createdWorktree, setup: setupLaunch })
++    mockLaunchWorktreeBackgroundTerminals.mockResolvedValue(undefined)
++    mockOnDispatchRequested.mockReturnValue(() => {})
++    mockSshNeedsPassphrasePrompt.mockResolvedValue(false)
++    mockSshGetState.mockResolvedValue({ status: 'connected' })
++    mockSshConnect.mockResolvedValue({ status: 'connected' })
++    mockSubmitPromptToAgentPty.mockResolvedValue(true)
++    vi.stubGlobal('window', {
++      api: {
++        automations: {
++          onDispatchRequested: mockOnDispatchRequested,
++          rendererReady: mockRendererReady,
++          markDispatchResult: mockMarkDispatchResult,
++          runPrecheck: vi.fn()
++        },
++        ssh: {
++          needsPassphrasePrompt: mockSshNeedsPassphrasePrompt,
++          getState: mockSshGetState,
++          connect: mockSshConnect
++        }
++      },
++      dispatchEvent: vi.fn()
++    })
++  })
++
++  it('ignores agent done and completes only from verified zero process exit', async () => {
++    let launchArgs: Parameters<typeof mockLaunchAgentBackgroundSession>[0] = {}
++    mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
++      launchArgs = args
++      args.onAgentStatus?.({ state: 'done' })
++      return {
++        tabId: 'agent-tab',
++        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
++        ptyId: 'agent-pty',
++        startupPlan: {},
++        completionAuthority: 'process-exit',
++        terminalOwnership: {
++          finalize: mockFinalizeTerminalOwnership,
++          release: mockReleaseTerminalOwnership
++        }
++      }
++    })
++
++    await registerAndDispatch()
++    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
++      expect.objectContaining({ status: 'dispatched', completionAuthority: 'process-exit' })
++    )
++    launchArgs.onAgentStatus?.({ state: 'done' })
++    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
++    expect(
++      mockMarkDispatchResult.mock.calls.filter(([result]) => result.status === 'completed')
++    ).toHaveLength(0)
++    launchArgs.onExit?.('agent-pty', 0, { kind: 'exited', exitCode: 0 })
++    await vi.waitFor(() => expect(mockFinalizeTerminalOwnership).toHaveBeenCalledOnce())
++    expect(mockReleaseTerminalOwnership).not.toHaveBeenCalled()
++  })
++
++  it.each([
++    ['operator close', { kind: 'operator_close' as const }],
++    ['signal', { kind: 'signaled' as const, signal: 9 }],
++    ['unknown cause', { kind: 'unknown' as const, reason: 'cause_unreported' as const }]
++  ])('does not complete from legacy code 0 with %s', async (_label, exitCause) => {
++    let onExit: Parameters<typeof mockLaunchAgentBackgroundSession>[0]['onExit']
++    mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
++      onExit = args.onExit
++      return {
++        tabId: 'agent-tab',
++        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
++        ptyId: 'agent-pty',
++        startupPlan: {},
++        completionAuthority: 'process-exit',
++        terminalOwnership: {
++          finalize: mockFinalizeTerminalOwnership,
++          release: mockReleaseTerminalOwnership
++        }
++      }
++    })
++
++    await registerAndDispatch()
++    onExit?.('agent-pty', 0, exitCause)
++    await vi.waitFor(() => expect(mockReleaseTerminalOwnership).toHaveBeenCalledOnce())
++    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
++    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
++      expect.objectContaining({ status: 'dispatch_failed' })
++    )
++  })
++
++  it('fails closed when legacy code 0 has no verified cause', async () => {
++    let onExit: Parameters<typeof mockLaunchAgentBackgroundSession>[0]['onExit']
++    mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
++      onExit = args.onExit
++      return {
++        tabId: 'agent-tab',
++        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
++        ptyId: 'agent-pty',
++        startupPlan: {},
++        completionAuthority: 'process-exit',
++        terminalOwnership: {
++          finalize: mockFinalizeTerminalOwnership,
++          release: mockReleaseTerminalOwnership
++        }
++      }
++    })
++
++    await registerAndDispatch()
++    onExit?.('agent-pty', 0)
++    await vi.waitFor(() => expect(mockReleaseTerminalOwnership).toHaveBeenCalledOnce())
++    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
++    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
++      expect.objectContaining({
++        status: 'dispatch_failed',
++        error: expect.stringContaining('without a verified exit cause')
++      })
++    )
++  })
++})
 diff --git a/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts b/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
-index b8c1cb49c170917b6ad612d194061857bfa00aa5..0ce5b6b6ac2ff1db75f25cf51cd0f508ac7b4fa5 100644
+index b8c1cb49c170917b6ad612d194061857bfa00aa5..10e81a457e0cd5b15f2b6e5fa016da9adb2f4f37 100644
 --- a/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
 +++ b/src/renderer/src/hooks/useAutomationDispatchEvents.test.ts
 @@ -211,0 +212 @@ describe('useAutomationDispatchEvents setup launch', () => {
@@ -931,111 +1201,109 @@ index b8c1cb49c170917b6ad612d194061857bfa00aa5..0ce5b6b6ac2ff1db75f25cf51cd0f508
 +    )
 @@ -605,0 +615 @@ describe('useAutomationDispatchEvents setup launch', () => {
 +        completionAuthority: 'agent-status',
-@@ -751 +761 @@ describe('useAutomationDispatchEvents setup launch', () => {
+@@ -751,33 +760,0 @@ describe('useAutomationDispatchEvents setup launch', () => {
 -  it('consumes duplicate done and zero-exit completion through one finalizer', async () => {
-+  it('ignores one-shot agent done and completes only from zero process exit', async () => {
-@@ -754 +764,5 @@ describe('useAutomationDispatchEvents setup launch', () => {
+-    let launchArgs: {
+-      onAgentStatus?: (payload: { state: string }) => void
 -      onExit?: (ptyId: string, code: number) => void
-+      onExit?: (
-+        ptyId: string,
-+        code: number,
-+        exitCause?: { kind: 'exited'; exitCode: number }
-+      ) => void
-@@ -757,0 +772 @@ describe('useAutomationDispatchEvents setup launch', () => {
-+      args.onAgentStatus?.({ state: 'done' })
-@@ -762,0 +778 @@ describe('useAutomationDispatchEvents setup launch', () => {
-+        completionAuthority: 'process-exit',
-@@ -770,0 +787,6 @@ describe('useAutomationDispatchEvents setup launch', () => {
-+    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
-+      expect.objectContaining({
-+        status: 'dispatched',
-+        completionAuthority: 'process-exit'
-+      })
-+    )
-@@ -772 +794,5 @@ describe('useAutomationDispatchEvents setup launch', () => {
+-    } = {}
+-    mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
+-      launchArgs = args
+-      return {
+-        tabId: 'agent-tab',
+-        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
+-        ptyId: 'agent-pty',
+-        startupPlan: {},
+-        terminalOwnership: {
+-          finalize: mockFinalizeTerminalOwnership,
+-          release: mockReleaseTerminalOwnership
+-        }
+-      }
+-    })
+-
+-    await registerAndDispatch()
+-    launchArgs.onAgentStatus?.({ state: 'done' })
 -    launchArgs.onExit?.('agent-pty', 0)
-+    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
-+    expect(
-+      mockMarkDispatchResult.mock.calls.filter(([result]) => result.status === 'completed')
-+    ).toHaveLength(0)
-+    launchArgs.onExit?.('agent-pty', 0, { kind: 'exited', exitCode: 0 })
-@@ -783,0 +810,70 @@ describe('useAutomationDispatchEvents setup launch', () => {
-+  it.each([
-+    ['人工關閉', { kind: 'operator_close' as const }],
-+    ['signal', { kind: 'signaled' as const, signal: 9 }],
-+    ['未知原因', { kind: 'unknown' as const, reason: 'cause_unreported' as const }]
-+  ])('does not complete one-shot from legacy code 0 with %s cause', async (_label, exitCause) => {
-+    let onExit:
-+      | ((
-+          ptyId: string,
-+          code: number,
-+          cause?:
-+            | { kind: 'operator_close' }
-+            | { kind: 'signaled'; signal: number }
-+            | { kind: 'unknown'; reason: 'cause_unreported' }
-+        ) => void)
-+      | undefined
-+    mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
-+      onExit = args.onExit
-+      return {
-+        tabId: 'agent-tab',
-+        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-+        ptyId: 'agent-pty',
-+        startupPlan: {},
-+        completionAuthority: 'process-exit',
-+        terminalOwnership: {
-+          finalize: mockFinalizeTerminalOwnership,
-+          release: mockReleaseTerminalOwnership
-+        }
+-    launchArgs.onAgentStatus?.({ state: 'done' })
+-    await vi.waitFor(() => expect(mockFinalizeTerminalOwnership).toHaveBeenCalledOnce())
+-
+-    expect(
+-      mockMarkDispatchResult.mock.calls.filter(
+-        ([result]) => result.status === 'completed' && result.terminalPaneKey !== null
+-      )
+-    ).toHaveLength(1)
+-    expect(mockReleaseTerminalOwnership).not.toHaveBeenCalled()
+-  })
+-
+@@ -792,0 +770 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'agent-status',
+@@ -833,0 +812 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'agent-status',
+@@ -861,0 +841 @@ describe('useAutomationDispatchEvents setup launch', () => {
++        completionAuthority: 'agent-status',
+diff --git a/src/renderer/src/lib/agent-background-io-coordinator.ts b/src/renderer/src/lib/agent-background-io-coordinator.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..143cf3be4f04a6d59b0cd5155df1acbce86c49fc
+--- /dev/null
++++ b/src/renderer/src/lib/agent-background-io-coordinator.ts
+@@ -0,0 +1,57 @@
++import { useAppStore } from '@/store'
++import type { LaunchAgentBackgroundSessionArgs } from '@/lib/agent-background-session-contract'
++import type { createBackgroundAgentStatusConsumer } from '@/lib/background-agent-status-consumer'
++import type { createSshBackgroundStartupDelivery } from '@/lib/ssh-background-startup-delivery'
++import type { TerminalExitCause } from '../../../shared/terminal-exit-cause'
++
++type BackgroundStatusConsumer = ReturnType<typeof createBackgroundAgentStatusConsumer>
++type SshStartupDelivery = ReturnType<typeof createSshBackgroundStartupDelivery>
++
++export function createAgentBackgroundIoCoordinator(args: {
++  getPaneKey: () => string
++  getPtyId: () => string
++  getTabId: () => string | null
++  getUnsubscribeData: () => () => void
++  getUnsubscribeExit: () => () => void
++  sshStartupDelivery: SshStartupDelivery
++  agentStatusConsumer: BackgroundStatusConsumer
++  onData: LaunchAgentBackgroundSessionArgs['onData']
++  onExit: LaunchAgentBackgroundSessionArgs['onExit']
++}): {
++  handleData: (data: string) => void
++  handleExit: (ptyId: string, code: number, cause?: TerminalExitCause) => void
++  markHandled: () => void
++} {
++  let handled = false
++
++  return {
++    handleData(data) {
++      data = args.sshStartupDelivery.handleData(data)
++      args.onData?.(data)
++      args.sshStartupDelivery.schedule(args.getPtyId())
++      args.agentStatusConsumer.consume(data)
++    },
++    handleExit(ptyId, code, cause) {
++      if (handled) {
++        return
 +      }
-+    })
-+
-+    await registerAndDispatch()
-+    onExit?.('agent-pty', 0, exitCause)
-+    await vi.waitFor(() => expect(mockReleaseTerminalOwnership).toHaveBeenCalledOnce())
-+
-+    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
-+    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
-+      expect.objectContaining({ status: 'dispatch_failed' })
-+    )
-+  })
-+
-+  it('fails one-shot closed when legacy code 0 has no verified cause', async () => {
-+    let onExit: ((ptyId: string, code: number) => void) | undefined
-+    mockLaunchAgentBackgroundSession.mockImplementation(async (args) => {
-+      onExit = args.onExit
-+      return {
-+        tabId: 'agent-tab',
-+        paneKey: 'agent-tab:7c6fb4e5-3bf1-4ff4-8259-03f7ae81c40d',
-+        ptyId: 'agent-pty',
-+        startupPlan: {},
-+        completionAuthority: 'process-exit',
-+        terminalOwnership: {
-+          finalize: mockFinalizeTerminalOwnership,
-+          release: mockReleaseTerminalOwnership
-+        }
++      handled = true
++      args.getUnsubscribeExit()()
++      args.getUnsubscribeData()()
++      args.sshStartupDelivery.clear()
++      const tabId = args.getTabId()
++      if (tabId) {
++        useAppStore.getState().clearTabPtyId(tabId, ptyId)
 +      }
-+    })
-+
-+    await registerAndDispatch()
-+    onExit?.('agent-pty', 0)
-+    await vi.waitFor(() => expect(mockReleaseTerminalOwnership).toHaveBeenCalledOnce())
-+
-+    expect(mockFinalizeTerminalOwnership).not.toHaveBeenCalled()
-+    expect(mockMarkDispatchResult).toHaveBeenCalledWith(
-+      expect.objectContaining({
-+        status: 'dispatch_failed',
-+        error: expect.stringContaining('without a verified exit cause')
-+      })
-+    )
-+  })
-+
-@@ -792,0 +889 @@ describe('useAutomationDispatchEvents setup launch', () => {
-+        completionAuthority: 'agent-status',
-@@ -833,0 +931 @@ describe('useAutomationDispatchEvents setup launch', () => {
-+        completionAuthority: 'agent-status',
-@@ -861,0 +960 @@ describe('useAutomationDispatchEvents setup launch', () => {
-+        completionAuthority: 'agent-status',
++      useAppStore.getState().clearAgentLaunchConfig(args.getPaneKey())
++      if (cause) {
++        args.onExit?.(ptyId, code, cause)
++      } else {
++        args.onExit?.(ptyId, code)
++      }
++    },
++    markHandled() {
++      handled = true
++    }
++  }
++}
 diff --git a/src/renderer/src/lib/agent-background-session-contract.ts b/src/renderer/src/lib/agent-background-session-contract.ts
 index 26145d313ddbe3eb0d00a3549e4745d125361d00..b54329c3947b01810ab7e6cef9359147d09c3cad 100644
 --- a/src/renderer/src/lib/agent-background-session-contract.ts
@@ -1493,7 +1761,7 @@ index 42df8332882b9aa03dfb168d7e156aabe06c1135..72e504eac4072a070da4bef9e040d959
 @@ -136,0 +192 @@ describe('launchAgentBackgroundSession', () => {
 +    expect(mockSpawn.mock.calls[0]?.[0]?.env).not.toHaveProperty('ORCA_REQUIRE_CHILD_EXIT_STATUS')
 diff --git a/src/renderer/src/lib/launch-agent-background-session.ts b/src/renderer/src/lib/launch-agent-background-session.ts
-index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..805d42106450e0d003abcfdbec8106c594c71691 100644
+index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..bf7a0b1b00c9e8972453f9ac0befd37fd8f18e7e 100644
 --- a/src/renderer/src/lib/launch-agent-background-session.ts
 +++ b/src/renderer/src/lib/launch-agent-background-session.ts
 @@ -2 +1,0 @@ import { useAppStore } from '@/store'
@@ -1502,19 +1770,18 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..805d42106450e0d003abcfdbec8106c5
 +import { buildAutomationBackgroundStartup } from '@/lib/automation-one-shot-startup'
 @@ -34 +33,0 @@ import { isMainTerminalSideEffectAuthorityForPty } from '@/components/terminal-p
 -import { resolveLocalWindowsAgentStartupShell } from '../../../shared/windows-terminal-shell'
-@@ -42,0 +42,4 @@ import { isWslUncPath } from '../../../shared/wsl-paths'
-+import {
-+  REQUIRE_CHILD_EXIT_STATUS_ENV_VAR,
-+  type TerminalExitCause
-+} from '../../../shared/terminal-exit-cause'
-@@ -56 +59 @@ export async function launchAgentBackgroundSession(
+@@ -41,0 +41 @@ import { createBackgroundAgentStatusConsumer } from '@/lib/background-agent-stat
++import { createAgentBackgroundIoCoordinator } from '@/lib/agent-background-io-coordinator'
+@@ -42,0 +43 @@ import { isWslUncPath } from '../../../shared/wsl-paths'
++import { REQUIRE_CHILD_EXIT_STATUS_ENV_VAR } from '../../../shared/terminal-exit-cause'
+@@ -56 +57 @@ export async function launchAgentBackgroundSession(
 -  const agentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
 +  const defaultAgentArgs = resolveTuiAgentLaunchArgs(agent, store.settings?.agentDefaultArgs)
-@@ -64,0 +68,3 @@ export async function launchAgentBackgroundSession(
+@@ -64,0 +66,3 @@ export async function launchAgentBackgroundSession(
 +  const runtimeTarget = getActiveRuntimeTarget(
 +    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 +  )
-@@ -77,12 +83 @@ export async function launchAgentBackgroundSession(
+@@ -77,12 +81 @@ export async function launchAgentBackgroundSession(
 -  const { platform: launchPlatform, isRemote } = launchHost
 -  const startupShell = resolveLocalWindowsAgentStartupShell({
 -    platform: launchPlatform,
@@ -1528,13 +1795,13 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..805d42106450e0d003abcfdbec8106c5
 -  const pasteDraftAfterLaunch = hasPrompt && isFollowupPath ? trimmedPrompt : null
 -  const startupPlan = buildAgentStartupPlan({
 +  const startup = buildAutomationBackgroundStartup({
-@@ -90 +85 @@ export async function launchAgentBackgroundSession(
+@@ -90 +83 @@ export async function launchAgentBackgroundSession(
 -    prompt: hasPrompt && !isFollowupPath ? trimmedPrompt : '',
 +    prompt,
-@@ -92 +87 @@ export async function launchAgentBackgroundSession(
+@@ -92 +85 @@ export async function launchAgentBackgroundSession(
 -    agentArgs,
 +    agentArgs: defaultAgentArgs,
-@@ -94,4 +89,5 @@ export async function launchAgentBackgroundSession(
+@@ -94,4 +87,5 @@ export async function launchAgentBackgroundSession(
 -    platform: launchPlatform,
 -    shell: startupShell,
 -    isRemote,
@@ -1544,62 +1811,100 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..805d42106450e0d003abcfdbec8106c5
 +    worktreePath: worktree.path,
 +    terminalWindowsShell: store.settings?.terminalWindowsShell,
 +    oneShotRequested: args.oneShot
-@@ -99 +95 @@ export async function launchAgentBackgroundSession(
+@@ -99 +93 @@ export async function launchAgentBackgroundSession(
 -  if (!startupPlan) {
 +  if (!startup) {
-@@ -101,0 +98 @@ export async function launchAgentBackgroundSession(
+@@ -101,0 +96 @@ export async function launchAgentBackgroundSession(
 +  const startupPlan = startup.plan
-@@ -111,0 +109,6 @@ export async function launchAgentBackgroundSession(
+@@ -111,0 +107,6 @@ export async function launchAgentBackgroundSession(
 +  if (startup.completionAuthority === 'process-exit') {
 +    // macOS's TCC login(1) wrapper reports its own status, not the agent's. This
 +    // marker is consumed and removed by the process owner before spawn so the
 +    // one-shot's real exit status remains verifiable without leaking the marker.
 +    paneEnv[REQUIRE_CHILD_EXIT_STATUS_ENV_VAR] = '1'
 +  }
-@@ -124,4 +126,0 @@ export async function launchAgentBackgroundSession(
+@@ -124,4 +124,0 @@ export async function launchAgentBackgroundSession(
 -  // Route by the worktree's owner host, not the focused runtime.
 -  const runtimeTarget = getActiveRuntimeTarget(
 -    getSettingsForWorktreeRuntimeOwner(store, worktreeId)
 -  )
-@@ -139 +138 @@ export async function launchAgentBackgroundSession(
+@@ -134,2 +131 @@ export async function launchAgentBackgroundSession(
+-  let exitHandled = false,
+-    eagerPtyBuffer: EagerPtyHandle | null = null
++  let eagerPtyBuffer: EagerPtyHandle | null = null
+@@ -139,14 +134,0 @@ export async function launchAgentBackgroundSession(
 -  const handleExit = (exitPtyId: string, code: number): void => {
-+  const handleExit = (exitPtyId: string, code: number, exitCause?: TerminalExitCause): void => {
-@@ -151 +150,5 @@ export async function launchAgentBackgroundSession(
+-    if (exitHandled) {
+-      return
+-    }
+-    exitHandled = true
+-    unsubscribeExit()
+-    unsubscribeData()
+-    sshStartupDelivery.clear()
+-    if (tab) {
+-      useAppStore.getState().clearTabPtyId(tab.id, exitPtyId)
+-    }
+-    useAppStore.getState().clearAgentLaunchConfig(paneKey)
 -    onExit?.(exitPtyId, code)
-+    if (exitCause) {
-+      onExit?.(exitPtyId, code, exitCause)
-+    } else {
-+      onExit?.(exitPtyId, code)
-+    }
-@@ -184 +187,3 @@ export async function launchAgentBackgroundSession(
+-  }
+@@ -168,6 +150,11 @@ export async function launchAgentBackgroundSession(
+-  const handleData = (data: string): void => {
+-    data = sshStartupDelivery.handleData(data)
+-    onData?.(data)
+-    sshStartupDelivery.schedule(ptyId)
+-    agentStatusConsumer.consume(data)
+-  }
++  const ioCoordinator = createAgentBackgroundIoCoordinator({
++    getPaneKey: () => paneKey,
++    getPtyId: () => ptyId,
++    getTabId: () => tab?.id ?? null,
++    getUnsubscribeData: () => unsubscribeData,
++    getUnsubscribeExit: () => unsubscribeExit,
++    sshStartupDelivery,
++    agentStatusConsumer,
++    onData,
++    onExit
++  })
+@@ -184 +171,3 @@ export async function launchAgentBackgroundSession(
 -        ...(hasPrompt && !isFollowupPath ? { prompt: trimmedPrompt } : {}),
 +        ...(startup.hasPrompt && !startup.isFollowupPath && !startup.oneShot.enabled
 +          ? { prompt: startup.trimmedPrompt }
 +          : {}),
-@@ -249 +254 @@ export async function launchAgentBackgroundSession(
+@@ -237 +226 @@ export async function launchAgentBackgroundSession(
+-        exitHandled = true
++        ioCoordinator.markHandled()
+@@ -249 +238 @@ export async function launchAgentBackgroundSession(
 -    if (agent === 'command-code' && hasPrompt && !isFollowupPath) {
 +    if (agent === 'command-code' && startup.hasPrompt && !startup.isFollowupPath) {
-@@ -257 +262 @@ export async function launchAgentBackgroundSession(
+@@ -257 +246 @@ export async function launchAgentBackgroundSession(
 -          { state: 'working', prompt: trimmedPrompt, agentType: agent, observation },
 +          { state: 'working', prompt: startup.trimmedPrompt, agentType: agent, observation },
-@@ -287 +292,5 @@ export async function launchAgentBackgroundSession(
+@@ -274 +263 @@ export async function launchAgentBackgroundSession(
+-        handleData
++        ioCoordinator.handleData
+@@ -282 +271 @@ export async function launchAgentBackgroundSession(
+-        .then((result) => handleExit(ptyId, result.wait.exitCode ?? 0))
++        .then((result) => ioCoordinator.handleExit(ptyId, result.wait.exitCode ?? 0))
+@@ -287,2 +276,6 @@ export async function launchAgentBackgroundSession(
 -      eagerPtyBuffer = registerEagerPtyBuffer(ptyId, handleExit, spawned.incarnationId)
+-      unsubscribeData = subscribeToPtyData(ptyId, handleData)
 +      eagerPtyBuffer = registerEagerPtyBuffer(
 +        ptyId,
-+        (exitPtyId, code, context) => handleExit(exitPtyId, code, context?.exitCause),
++        (exitPtyId, code, context) => ioCoordinator.handleExit(exitPtyId, code, context?.exitCause),
 +        spawned.incarnationId
 +      )
-@@ -292 +301,3 @@ export async function launchAgentBackgroundSession(
++      unsubscribeData = subscribeToPtyData(ptyId, ioCoordinator.handleData)
+@@ -292 +285,3 @@ export async function launchAgentBackgroundSession(
 -      unsubscribeExit = subscribeToPtyExit(ptyId, (code) => handleExit(ptyId, code))
 +      unsubscribeExit = subscribeToPtyExit(ptyId, (code, context) =>
-+        handleExit(ptyId, code, context?.exitCause)
++        ioCoordinator.handleExit(ptyId, code, context?.exitCause)
 +      )
-@@ -300,2 +311,2 @@ export async function launchAgentBackgroundSession(
+@@ -300,2 +295,2 @@ export async function launchAgentBackgroundSession(
 -    if (pasteDraftAfterLaunch !== null) {
 -      scheduleAgentBackgroundDraft(tab.id, pasteDraftAfterLaunch, agent)
 +    if (startup.pasteDraftAfterLaunch !== null) {
 +      scheduleAgentBackgroundDraft(tab.id, startup.pasteDraftAfterLaunch, agent)
-@@ -304 +315,8 @@ export async function launchAgentBackgroundSession(
+@@ -304 +299,8 @@ export async function launchAgentBackgroundSession(
 -    return { tabId: tab.id, paneKey, ptyId, startupPlan, terminalOwnership }
 +    return {
 +      tabId: tab.id,
@@ -1609,6 +1914,9 @@ index a1d9f1df65486485c6b2c43ec8534f595faa6f1a..805d42106450e0d003abcfdbec8106c5
 +      terminalOwnership,
 +      completionAuthority: startup.completionAuthority
 +    }
+@@ -308 +310 @@ export async function launchAgentBackgroundSession(
+-    exitHandled = true
++    ioCoordinator.markHandled()
 diff --git a/src/shared/automations-types.ts b/src/shared/automations-types.ts
 index 24d9345242d447288029f6a2f8cbab358d84eb85..df15fa61566f67981d4261e80f0b24dca23fd554 100644
 --- a/src/shared/automations-types.ts

@@ -1,6 +1,6 @@
 # KTW Orca v1.4.196 最小相容發行層
 
-施作者：Codex；更新時間：2026-09-03 14:50 +0800。
+施作者：Codex；更新時間：2026-09-03 15:21 +0800。
 
 這個 overlay 疊到官方 `v1.4.196` tag 的 peeled exact commit
 `aad4ae42ea5e555f25fdec679ebbcd18cc1e8911`。官方版本已包含：
@@ -50,7 +50,7 @@ one-shot 啟動與 completion authority。
 
 ## 驗證契約
 
-`manifest.json` 綁定官方 base、39 個允許路徑、zero-context full-index patch SHA-256
+`manifest.json` 綁定官方 base、41 個允許路徑、zero-context full-index patch SHA-256
 與完整 output tree SHA。required static-analysis 會先從官方 upstream 精確抓取
 v1.4.192／v1.4.196 兩個 base commit，再逐份物化驗證；驗證器使用 temporary Git
 index，不修改目前工作樹：
@@ -60,11 +60,12 @@ node config/scripts/verify-ktw-release-overlay.mjs \
   config/ktw-release-overlays/v1.4.196/manifest.json
 ```
 
-本候選已以官方 v1.4.196 精確依賴通過：one-shot／completion／exit-cause 鏈路
-15 個測試檔 305 項（包含官方 retained-PTY hydration／swap；large inventory fixture
-為 150,000 sessions，涵蓋本機 32-session 規模）、typecheck、`build:unpack`。
+本候選已以官方 v1.4.196 精確依賴通過：整庫 `oxlint` 0 error、
+one-shot／completion／exit-cause 鏈路 16 個測試檔 304 項（包含官方 retained-PTY
+hydration／swap；large inventory fixture 為 150,000 sessions，涵蓋本機 32-session
+規模）、typecheck、`build:unpack`。
 打包候選 app.asar SHA-256 為
-`c21b8c8065a95a8edb6d38f73000858a13aed6cd0d7fbc67fa1d747d7d1c8aa6`。
+`c13497abdbc3fe6df7cf3dcf8f8569b36d81d93d8748c921ef35293b2dad3843`。
 
 recipe 本身不安裝 App、不停止 daemon，也不讀寫 credential。正式換版仍須另案 Slack
 核准，並以 preinstall 全部 `ptyId + incarnationId` 的 N/N continuity、原 daemon PID
