@@ -26,6 +26,14 @@ const OVERLAYS = [
     officialBaseSha: 'aad4ae42ea5e555f25fdec679ebbcd18cc1e8911',
     pathCount: 41,
     outputTreeSha: 'c4e34a96e39d81897625eaa58ae959beb77f4f1b'
+  },
+  {
+    manifestPath: 'config/ktw-release-overlays/v1.4.197/manifest.json',
+    patchPath:
+      'config/ktw-release-overlays/v1.4.197/0001-KTW-one-shot與completion相容層.patch',
+    officialBaseSha: '5ee4ace516080891731d100f843b074408a9ce0e',
+    pathCount: 45,
+    outputTreeSha: 'ffde5c221a6043e0df8d762dd999e830003ee76d'
   }
 ].map((overlay) => ({
   ...overlay,
