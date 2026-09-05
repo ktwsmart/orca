@@ -133,10 +133,12 @@ jobs:
           git fetch --no-tags --filter=blob:none \
             https://github.com/stablyai/orca.git \
             ce4df07736baa38d742613bd68d5a3d845f79d25 \
-            aad4ae42ea5e555f25fdec679ebbcd18cc1e8911
+            aad4ae42ea5e555f25fdec679ebbcd18cc1e8911 \
+            5ee4ace516080891731d100f843b074408a9ce0e
           for manifest in \
             config/ktw-release-overlays/v1.4.192/manifest.json \
-            config/ktw-release-overlays/v1.4.196/manifest.json
+            config/ktw-release-overlays/v1.4.196/manifest.json \
+            config/ktw-release-overlays/v1.4.197/manifest.json
           do
             node config/scripts/verify-ktw-release-overlay.mjs "$manifest"
           done
